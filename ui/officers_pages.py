@@ -7,29 +7,32 @@ import customtkinter as ctk
 
 from config import (
     DATE_INPUT_HINT,
-    DEFAULT_ANNUAL_HOURS,
-    OFFICER_SHIFT_OPTIONS,
     OFFICER_SQUAD_OPTIONS,
-    OFFICER_TITLE_OPTIONS,
     OFFICER_UNASSIGNED_LABEL,
+    YEARLY_SALARY_TITLES,
 )
 from logic import (
+    add_custom_officer_title,
     add_officer,
     bulk_adjust_pay_rates,
     delete_officer,
+    get_builtin_officer_titles,
     get_officer_by_id,
     get_officer_time_banks,
+    get_officer_title_options,
     get_officers_by_seniority,
     get_pay_period_hours_by_officer,
     get_suggested_seniority_rank,
     import_roster_from_csv,
     project_officer_annual_pay,
     set_officer_photo,
+    suggested_hourly_rate_for_title,
     update_officer,
 )
 from logic import (
     remove_officer_photo as logic_remove_officer_photo,
 )
+from logic.staffing_config import get_active_annual_hours_target, get_officer_shift_options
 from photos import load_thumbnail
 from ui.helpers import refresh_all_officer_dropdowns
 from ui.theme import (
@@ -153,16 +156,35 @@ class OfficersPageMixin:
             text_color=UI_TEXT_MUTED,
             anchor="w",
         ).pack(fill="x", pady=(8, 4))
-        self._job_title_var = ctk.StringVar(value=OFFICER_TITLE_OPTIONS[0])
+        builtin = get_builtin_officer_titles()
+        self._job_title_var = ctk.StringVar(value=builtin[0])
         self.off_job_title = ctk.CTkComboBox(
             name_col,
-            values=list(OFFICER_TITLE_OPTIONS),
+            values=get_officer_title_options(),
             height=36,
             variable=self._job_title_var,
             state="readonly",
             command=self._on_job_title_selected,
         )
         self.off_job_title.pack(fill="x")
+        if self.can("officers.manage"):
+            title_add_row = ctk.CTkFrame(name_col, fg_color="transparent")
+            title_add_row.pack(fill="x", pady=(4, 0))
+            self._new_title_entry = ctk.CTkEntry(
+                title_add_row,
+                height=32,
+                placeholder_text="Add custom title (e.g. Administrative Assistant)",
+            )
+            self._new_title_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ctk.CTkButton(
+                title_add_row,
+                text="Add Title",
+                width=90,
+                height=32,
+                fg_color=UI_BORDER,
+                hover_color=DODGEVILLE_ACCENT,
+                command=self._add_officer_title,
+            ).pack(side="right")
         assign_row = ctk.CTkFrame(name_col, fg_color="transparent")
         assign_row.pack(fill="x", pady=(8, 0))
         assign_row.grid_columnconfigure((0, 1), weight=1)
@@ -194,10 +216,11 @@ class OfficersPageMixin:
             text_color=UI_TEXT_MUTED,
             anchor="w",
         ).pack(fill="x", pady=(0, 4))
-        self._shift_var = ctk.StringVar(value=OFFICER_SHIFT_OPTIONS[1])
+        shift_options = get_officer_shift_options()
+        self._shift_var = ctk.StringVar(value=shift_options[1] if len(shift_options) > 1 else shift_options[0])
         self.off_shift = ctk.CTkComboBox(
             shift_col,
-            values=list(OFFICER_SHIFT_OPTIONS),
+            values=list(get_officer_shift_options()),
             height=36,
             variable=self._shift_var,
             state="readonly",
@@ -269,7 +292,19 @@ class OfficersPageMixin:
         self.off_seniority = FormField(
             form_scroll, "Seniority Rank (roster lookup)", lambda p: ctk.CTkEntry(p, height=36)
         ).widget
-        self.off_pay = FormField(form_scroll, "Pay Rate ($/hr)", lambda p: ctk.CTkEntry(p, height=36)).widget
+        self.off_pay = FormField(
+            form_scroll,
+            "Base Pay Rate ($/hr)",
+            lambda p: ctk.CTkEntry(p, height=36),
+        ).widget
+        self.off_pay_hint = ctk.CTkLabel(
+            form_scroll,
+            text="Auto-filled from title monthly pay (×12÷2008) — supervisors may override",
+            font=font("small"),
+            text_color=UI_TEXT_MUTED,
+            anchor="w",
+        )
+        self.off_pay_hint.pack(fill="x", pady=(0, 4))
         self.off_night_diff = FormField(
             form_scroll,
             "Night Differential ($/hr)",
@@ -281,7 +316,7 @@ class OfficersPageMixin:
         annual_frame = ctk.CTkFrame(pay_row, fg_color="transparent")
         annual_frame.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.off_annual_hours = FormField(
-            annual_frame, "Annual Hours Target", lambda p: ctk.CTkEntry(p, height=36, placeholder_text="2080")
+            annual_frame, "Annual Hours Target", lambda p: ctk.CTkEntry(p, height=36, placeholder_text="2008")
         ).widget
         ot_frame = ctk.CTkFrame(pay_row, fg_color="transparent")
         ot_frame.grid(row=0, column=1, sticky="ew", padx=(6, 0))
@@ -394,6 +429,30 @@ class OfficersPageMixin:
 
     def _on_job_title_selected(self, _value=None):
         self._job_title_var.set(self.off_job_title.get())
+        if self.can("officers.manage"):
+            hourly = suggested_hourly_rate_for_title(self._job_title_var.get())
+            if hourly and hourly > 0:
+                self.off_pay.delete(0, "end")
+                self.off_pay.insert(0, f"{hourly:.2f}")
+            self._refresh_pay_rate_hint()
+
+    def _refresh_pay_rate_hint(self):
+        if not hasattr(self, "off_pay_hint"):
+            return
+        title = self._job_title_var.get()
+        hourly = suggested_hourly_rate_for_title(title)
+        if hourly and hourly > 0:
+            if title in YEARLY_SALARY_TITLES:
+                formula = "yearly salary ÷ 2008"
+            else:
+                formula = "monthly × 12 ÷ 2008"
+            self.off_pay_hint.configure(
+                text=f"Suggested from {title}: ${hourly:.2f}/hr ({formula}) — editable",
+            )
+        else:
+            self.off_pay_hint.configure(
+                text="Set title pay on Payroll → Position Pay Rates, or enter base rate manually",
+            )
 
     def _on_squad_selected(self, _value=None):
         self._squad_var.set(self.off_squad.get())
@@ -404,12 +463,37 @@ class OfficersPageMixin:
     def _assignment_combo_state(self) -> str:
         return "readonly" if self.can("officers.manage") else "disabled"
 
-    def _configure_job_title_combo(self, job_title=None):
-        normalized = normalize_officer_job_title(job_title) or OFFICER_TITLE_OPTIONS[0]
-        values = list(OFFICER_TITLE_OPTIONS)
-        if normalized not in values:
-            values = [normalized, *values]
+    def _refresh_officer_title_options(self):
+        values = get_officer_title_options()
+        current = self._job_title_var.get()
         self.off_job_title.configure(values=values)
+        if current in values:
+            self._job_title_var.set(current)
+        elif values:
+            self._job_title_var.set(values[0])
+
+    def _add_officer_title(self):
+        if not self.can("officers.manage"):
+            return
+        title = self._new_title_entry.get().strip()
+        if not title:
+            messagebox.showwarning("Add Title", "Enter a title name.")
+            return
+        uid = self.current_user.get("id") if self.current_user else None
+        result = add_custom_officer_title(title, user_id=uid)
+        if not result.get("success"):
+            messagebox.showerror("Add Title", result.get("message", "Failed"))
+            return
+        self._new_title_entry.delete(0, "end")
+        self._refresh_officer_title_options()
+        self._job_title_var.set(result["title"])
+        self.set_status(result.get("message", "Title added"))
+
+    def _configure_job_title_combo(self, job_title=None):
+        normalized = normalize_officer_job_title(job_title) or get_builtin_officer_titles()[0]
+        self._refresh_officer_title_options()
+        if normalized not in self.off_job_title.cget("values"):
+            self.off_job_title.configure(values=[normalized, *self.off_job_title.cget("values")])
         self._job_title_var.set(normalized)
         self.off_job_title.configure(state=self._assignment_combo_state())
 
@@ -422,9 +506,18 @@ class OfficersPageMixin:
         self._squad_var.set(display)
         self.off_squad.configure(state=self._assignment_combo_state())
 
+    def _refresh_officer_shift_options(self):
+        options = get_officer_shift_options()
+        current = self._shift_var.get().strip()
+        self.off_shift.configure(values=list(options))
+        if current in options:
+            self._shift_var.set(current)
+        elif len(options) > 1:
+            self._shift_var.set(options[1])
+
     def _configure_shift_combo(self, shift_start=None, shift_end=None):
         display = format_officer_shift_display(shift_start, shift_end)
-        values = list(OFFICER_SHIFT_OPTIONS)
+        values = list(get_officer_shift_options())
         if display not in values:
             values = [display, *values]
         self.off_shift.configure(values=values)
@@ -708,7 +801,7 @@ class OfficersPageMixin:
             (self.off_seniority, str(get_suggested_seniority_rank())),
             (self.off_pay, "30.0"),
             (self.off_night_diff, "1.0"),
-            (self.off_annual_hours, str(int(DEFAULT_ANNUAL_HOURS))),
+            (self.off_annual_hours, str(int(get_active_annual_hours_target()))),
             (self.off_ot_multiplier, "1.5"),
             (self.off_start_date, ""),
             (self.off_email, ""),
@@ -719,9 +812,11 @@ class OfficersPageMixin:
         self.off_address.delete("1.0", "end")
         self.off_banks.configure(text="Time banks: not set")
         self.off_pay_projection.configure(text="Annual pay projection: not set")
-        self._configure_job_title_combo(OFFICER_TITLE_OPTIONS[0])
+        self._configure_job_title_combo(get_builtin_officer_titles()[0])
         self._configure_squad_combo("A")
-        self._configure_shift_combo(*parse_officer_shift_ui(OFFICER_SHIFT_OPTIONS[1]))
+        opts = get_officer_shift_options()
+        default_shift = opts[1] if len(opts) > 1 else opts[0]
+        self._configure_shift_combo(*parse_officer_shift_ui(default_shift))
         self.off_active.select()
         self._show_officer_photo()
         self.refresh_officer_list()
@@ -753,7 +848,7 @@ class OfficersPageMixin:
             (self.off_seniority, str(officer["seniority_rank"])),
             (self.off_pay, str(officer["pay_rate"])),
             (self.off_night_diff, str(officer.get("night_differential_rate", 1.0))),
-            (self.off_annual_hours, str(officer.get("annual_hours_target") or DEFAULT_ANNUAL_HOURS)),
+            (self.off_annual_hours, str(officer.get("annual_hours_target") or get_active_annual_hours_target())),
             (self.off_ot_multiplier, str(officer.get("overtime_multiplier") or 1.5)),
             (self.off_start_date, format_date(officer["start_date"]) if officer.get("start_date") else ""),
             (self.off_email, officer.get("email") or ""),
@@ -783,6 +878,7 @@ class OfficersPageMixin:
         else:
             self.off_active.deselect()
         self._show_officer_photo(officer.get("photo_path"))
+        self._refresh_pay_rate_hint()
         self._refresh_officer_pay_projection(officer_id)
         self._highlight_officer_selection()
 
@@ -793,9 +889,10 @@ class OfficersPageMixin:
             return
         self.off_pay_projection.configure(
             text=(
-                f"Annual projection: {proj['annual_hours']:.0f}h "
-                f"(target {proj['annual_hours_target']:.0f}h) · "
-                f"${proj['total_annual_pay']:,.0f}/yr"
+                f"${proj.get('monthly_pay', 0):,.0f}/mo · "
+                f"${proj.get('per_pay_period_salary', 0):,.0f}/pay period · "
+                f"${proj.get('annual_salary', proj.get('base_annual_pay', 0)):,.0f}/yr salary"
+                f"  (+ OT ${proj.get('overtime_pay', 0):,.0f} projected)"
             )
         )
 
@@ -864,7 +961,7 @@ class OfficersPageMixin:
             seniority = int(self.off_seniority.get().strip())
             pay_rate = float(self.off_pay.get().strip())
             night_diff = float(self.off_night_diff.get().strip() or "1.0")
-            annual_target = float(self.off_annual_hours.get().strip() or str(DEFAULT_ANNUAL_HOURS))
+            annual_target = float(self.off_annual_hours.get().strip() or str(get_active_annual_hours_target()))
             ot_mult = float(self.off_ot_multiplier.get().strip() or "1.5")
         except ValueError:
             messagebox.showerror("Validation", "Check numeric fields (seniority, pay, hours, OT).")

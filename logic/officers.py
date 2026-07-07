@@ -15,7 +15,7 @@ from validators import (
 
 
 def get_officers_by_seniority() -> List[Dict]:
-    """Roster list sorted by seniority rank for UI lookup (not used in scheduling)."""
+    """Roster list sorted by seniority rank (ascending) for UI display and vacation grant ordering."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -81,7 +81,7 @@ def get_request_reviewer_officer_ids() -> List[int]:
 
 def describe_day_off_request(officer_id: int, request_date: str) -> Dict:
     from logic.operations import is_officer_unavailable_on_date
-    from logic.scheduling import is_officer_working_on_day, suggest_bump_chain
+    from logic.scheduling import is_officer_working_on_day, resolve_officer_shift_band, suggest_bump_chain
 
     """Advisory context for UI and supervisor notifications (does not block submit)."""
     officer = get_officer_by_id(officer_id)
@@ -91,11 +91,17 @@ def describe_day_off_request(officer_id: int, request_date: str) -> Dict:
     parsed = parse_date(request_date)
     on_rotation = is_officer_working_on_day(officer_id, parsed)
     unavailable = is_officer_unavailable_on_date(officer_id, parsed)
+    covered_start, _covered_end = resolve_officer_shift_band(
+        officer_id,
+        parsed,
+        home_shift_start=officer.get("shift_start"),
+        home_shift_end=officer.get("shift_end"),
+    )
     suggestion = suggest_bump_chain(
         officer_id,
         request_date,
         officer["squad"],
-        officer["shift_start"],
+        covered_start,
     )
     flags: List[str] = []
     if not on_rotation:
@@ -106,6 +112,8 @@ def describe_day_off_request(officer_id: int, request_date: str) -> Dict:
         flags.append("auto-approve eligible")
     elif suggestion.failure_reason == "minimum_rest":
         flags.append("minimum rest — supervisor override required")
+    elif suggestion.failure_reason == "consecutive_days":
+        flags.append("consecutive day limit — supervisor override required")
     else:
         flags.append("supervisor review likely")
 
@@ -133,13 +141,14 @@ def add_officer(
     phone: Optional[str] = None,
     address: Optional[str] = None,
     job_title: Optional[str] = None,
-    annual_hours_target: float = 2080.0,
+    annual_hours_target: Optional[float] = None,
     overtime_multiplier: float = 1.5,
 ) -> Dict:
     start_date = normalize_optional_text(start_date)
     email = normalize_optional_text(email)
     phone = normalize_optional_text(phone)
     address = normalize_optional_text(address)
+    from logic.staffing_config import get_active_annual_hours_target
     from validators import (
         normalize_officer_job_title,
         normalize_officer_shift,
@@ -149,6 +158,8 @@ def add_officer(
     job_title = normalize_officer_job_title(job_title)
     squad = normalize_officer_squad(squad)
     shift_start, shift_end = normalize_officer_shift(shift_start, shift_end)
+    if annual_hours_target is None:
+        annual_hours_target = get_active_annual_hours_target()
     validation = validate_officer_profile(
         name.strip(),
         seniority_rank,

@@ -8,6 +8,17 @@ from database import get_connection
 from paths import data_path, resource_path
 
 DEFAULT_SETTINGS = {
+    "rotation_cycle_length": "14",
+    "rotation_base_date": "",
+    "rotation_preset": "2-2-3 (Dodgeville 14-day)",
+    "rotation_squad_a_days": "",
+    "shift_length_hours": "11",
+    "department_annual_hours_target": "2080",
+    "shift_count": "4",
+    "target_officer_count": "16",
+    "department_shift_starts": "06:00, 10:00, 15:00, 19:00",
+    "department_shift_times": "",
+    "flsa_work_period_days": "",
     "overtime_threshold": "80",
     "locked_pay_period_start": "",
     "setup_complete": "",
