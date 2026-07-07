@@ -31,6 +31,12 @@ def load_error() -> Optional[str]:
     return _RUST_ERROR
 
 
+def _rotation_schedule() -> Dict[str, Any]:
+    from logic.rotation_config import get_rust_rotation_schedule
+
+    return get_rust_rotation_schedule()
+
+
 def get_cycle_day(target_date: date, base_date: date, cycle_length: int) -> int:
     if _RUST:
         return int(
@@ -47,10 +53,11 @@ def get_cycle_day(target_date: date, base_date: date, cycle_length: int) -> int:
 
 
 def get_squad_on_duty(cycle_day: int) -> str:
+    from logic.rotation_config import get_squad_on_duty as active_squad_on_duty
+
     if _RUST:
-        return str(_RUST.get_squad_on_duty(cycle_day))
-    squad_a = {1, 2, 5, 6, 7, 10, 11}
-    return "A" if cycle_day in squad_a else "B"
+        return str(_RUST.get_squad_on_duty(cycle_day, _rotation_schedule()))
+    return active_squad_on_duty(cycle_day)
 
 
 def build_schedule_matrix_rust(
@@ -76,6 +83,7 @@ def build_schedule_matrix_rust(
         end_date.isoformat(),
         base_date.isoformat(),
         cycle_length,
+        _rotation_schedule(),
     )
     days: List[date] = []
     for iso in payload["days"]:
@@ -130,17 +138,26 @@ def suggest_bump_chain_rust(
     request_date: str,
     squad: str,
     shift_start: str,
-    bump_rules: Dict[int, Tuple[int, ...]],
+    bump_rules_by_start: Dict[str, Tuple[str, ...]],
     shift_times: List[Tuple[str, str]],
+    schedule_context: Dict[int, Dict[str, str]],
     night_minimum: int,
     min_rest_hours: float,
     base_date: date,
     cycle_length: int,
+    max_assignments_before_busy: int = 2,
     max_depth: int = 8,
 ) -> Optional[Dict[str, Any]]:
     if not _RUST:
         return None
-    rules = {int(k): list(v) for k, v in bump_rules.items()}
+    rules = {start: list(allowed) for start, allowed in bump_rules_by_start.items()}
+    context = {
+        str(officer_id): {
+            "status": ctx.get("status", "off"),
+            "shift_start": ctx.get("shift_start", ""),
+        }
+        for officer_id, ctx in schedule_context.items()
+    }
     return dict(
         _RUST.suggest_bump_chain(
             officers,
@@ -151,10 +168,13 @@ def suggest_bump_chain_rust(
             shift_start,
             rules,
             shift_times,
+            context,
             night_minimum,
             min_rest_hours,
             base_date.isoformat(),
             cycle_length,
+            _rotation_schedule(),
+            max_assignments_before_busy,
             max_depth,
         )
     )

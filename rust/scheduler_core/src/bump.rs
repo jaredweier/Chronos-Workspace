@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::coverage::compute_shift_coverage_counts;
-use crate::rotation::{is_high_risk_night_ordinal, parse_ymd, shift_number};
-use crate::status::{Officer, OverrideMaps, officer_day_status, officer_working_on_day};
+use crate::rotation::{is_high_risk_night_ordinal, parse_ymd, RotationSchedule};
+use crate::status::{Officer, OverrideMaps, officer_day_status};
 
 #[derive(Clone)]
 pub struct OfficerFull {
@@ -45,6 +45,33 @@ fn parse_minutes(value: &str) -> i32 {
     h * 60 + m
 }
 
+fn schedule_working(status: &str) -> bool {
+    matches!(status, "working" | "covering" | "swapped" | "training")
+}
+
+fn replacement_shift_for_rules(officer: &OfficerFull, day_context: Option<&(String, String)>) -> String {
+    if let Some((status, assigned)) = day_context {
+        if schedule_working(status) && !assigned.is_empty() {
+            return assigned.clone();
+        }
+    }
+    officer.shift_start.clone()
+}
+
+fn can_cover_shift(replacement_start: &str, covered_start: &str, bump_rules: &HashMap<String, Vec<String>>) -> bool {
+    if replacement_start.is_empty() || covered_start.is_empty() {
+        return false;
+    }
+    bump_rules
+        .get(covered_start)
+        .map(|allowed| allowed.iter().any(|s| s == replacement_start))
+        .unwrap_or(false)
+}
+
+fn assignment_exhausted(officer_id: i64, counts: &HashMap<i64, i32>, max_assignments: i32) -> bool {
+    counts.get(&officer_id).copied().unwrap_or(0) >= max_assignments
+}
+
 fn rest_gap_hours(
     officer_id: i64,
     assignment_ordinal: i32,
@@ -53,7 +80,7 @@ fn rest_gap_hours(
     officers: &[OfficerFull],
     maps: &OverrideMaps,
     base_ordinal: i32,
-    cycle_length: i32,
+    schedule: &RotationSchedule,
     shift_times: &[(String, String)],
 ) -> Option<f64> {
     let officer = officers.iter().find(|o| o.id == officer_id)?;
@@ -74,16 +101,13 @@ fn rest_gap_hours(
             &date_key,
             adj_ord,
             base_ordinal,
-            cycle_length,
+            schedule,
             maps,
         );
         if !matches!(status.as_str(), "working" | "covering" | "swapped") {
             continue;
         }
-        let mut band_start = officer.shift_start.clone();
-        if status == "covering" {
-            band_start = officer.shift_start.clone();
-        }
+        let band_start = officer.shift_start.clone();
         let band_end = shift_end_for(&band_start, shift_times);
         let adj_start = parse_minutes(&band_start);
         let adj_end = parse_minutes(&band_end);
@@ -109,26 +133,20 @@ fn rest_gap_hours(
 
 fn find_replacement(
     original_id: i64,
-    request_date: &str,
-    squad: &str,
     shift_start: &str,
     officers: &[OfficerFull],
-    busy: &HashSet<i64>,
-    bump_rules: &HashMap<i32, Vec<i32>>,
+    assignment_counts: &HashMap<i64, i32>,
+    max_assignments: i32,
+    bump_rules: &HashMap<String, Vec<String>>,
+    day_context: &HashMap<i64, (String, String)>,
+    chain_replacements: &HashSet<i64>,
     shift_times: &[(String, String)],
     maps: &OverrideMaps,
     base_ordinal: i32,
-    cycle_length: i32,
+    schedule: &RotationSchedule,
     min_rest_hours: f64,
+    request_date: &str,
 ) -> Option<OfficerFull> {
-    let shift_num = shift_number(shift_start, shift_times);
-    let allowed: HashSet<i32> = bump_rules
-        .get(&shift_num)
-        .cloned()
-        .unwrap_or_else(|| vec![1, 2, 3, 4])
-        .into_iter()
-        .collect();
-
     let req_ord = parse_ymd(request_date).ok()?;
     let coverage_end = shift_end_for(shift_start, shift_times);
 
@@ -136,10 +154,14 @@ fn find_replacement(
         .iter()
         .filter(|o| {
             o.active
-                && o.squad == squad
                 && o.id != original_id
-                && !busy.contains(&o.id)
-                && allowed.contains(&shift_number(&o.shift_start, shift_times))
+                && !chain_replacements.contains(&o.id)
+                && !assignment_exhausted(o.id, assignment_counts, max_assignments)
+                && can_cover_shift(
+                    &replacement_shift_for_rules(o, day_context.get(&o.id)),
+                    shift_start,
+                    bump_rules,
+                )
         })
         .collect();
     candidates.sort_by_key(|o| o.id);
@@ -149,17 +171,9 @@ fn find_replacement(
     let mut off_rest_bad = None;
 
     for off in candidates {
-        if officer_working_on_day(
-            &Officer {
-                id: off.id,
-                squad: off.squad.clone(),
-                shift_start: off.shift_start.clone(),
-                active: off.active,
-            },
-            req_ord,
-            base_ordinal,
-            cycle_length,
-        ) {
+        let ctx = day_context.get(&off.id);
+        let working = ctx.map(|(s, _)| schedule_working(s)).unwrap_or(false);
+        if working {
             on_duty = on_duty.or(Some((*off).clone()));
         } else {
             let gap = rest_gap_hours(
@@ -170,7 +184,7 @@ fn find_replacement(
                 officers,
                 maps,
                 base_ordinal,
-                cycle_length,
+                schedule,
                 shift_times,
             );
             if gap.map_or(false, |g| g >= min_rest_hours) {
@@ -180,7 +194,42 @@ fn find_replacement(
             }
         }
     }
-    on_duty.or(off_rest_ok).or(off_rest_bad)
+    off_rest_ok.or(off_rest_bad).or(on_duty)
+}
+
+fn night_minimum_uncovered(
+    request_date: &str,
+    squad: &str,
+    shift_start: &str,
+    officers: &[Officer],
+    overrides_on_date: &[(i64, Option<i64>, Option<String>, String)],
+    shift_starts: &[String],
+    base_ordinal: i32,
+    schedule: &RotationSchedule,
+    night_minimum: i32,
+) -> bool {
+    if !is_high_risk_night_ordinal(parse_ymd(request_date).unwrap_or(0)) || !is_night_shift(shift_start) {
+        return false;
+    }
+    let override_rows: Vec<(String, i64, Option<i64>, Option<String>)> = overrides_on_date
+        .iter()
+        .map(|(o, r, c, _)| (request_date.to_string(), *o, *r, c.clone()))
+        .collect();
+    let counts = compute_shift_coverage_counts(
+        officers,
+        &override_rows,
+        request_date,
+        request_date,
+        shift_starts,
+        base_ordinal,
+        schedule.cycle_length,
+    )
+    .unwrap_or_default();
+    let current = counts
+        .get(&(request_date.to_string(), squad.to_string(), shift_start.to_string()))
+        .copied()
+        .unwrap_or(0);
+    current <= night_minimum
 }
 
 pub fn suggest_bump_chain_py(
@@ -191,57 +240,17 @@ pub fn suggest_bump_chain_py(
     request_date: &str,
     squad: &str,
     shift_start: &str,
-    bump_rules: HashMap<i32, Vec<i32>>,
+    bump_rules: HashMap<String, Vec<String>>,
     shift_times: Vec<(String, String)>,
+    day_context: HashMap<i64, (String, String)>,
     night_minimum: i32,
     min_rest_hours: f64,
     base_ordinal: i32,
-    cycle_length: i32,
+    schedule: RotationSchedule,
+    max_assignments_before_busy: i32,
     max_depth: usize,
 ) -> PyResult<PyObject> {
     let req_ord = parse_ymd(request_date)?;
-
-    if is_high_risk_night_ordinal(req_ord) && is_night_shift(shift_start) {
-        let shift_starts: Vec<String> = shift_times.iter().map(|(s, _)| s.clone()).collect();
-        let override_rows: Vec<(String, i64, Option<i64>, Option<String>)> = overrides_on_date
-            .iter()
-            .map(|(o, r, c, _)| (request_date.to_string(), *o, *r, c.clone()))
-            .collect();
-        let officer_rows: Vec<Officer> = officers
-            .iter()
-            .map(|o| Officer {
-                id: o.id,
-                squad: o.squad.clone(),
-                shift_start: o.shift_start.clone(),
-                active: o.active,
-            })
-            .collect();
-        let counts = compute_shift_coverage_counts(
-            &officer_rows,
-            &override_rows,
-            request_date,
-            request_date,
-            &shift_starts,
-            base_ordinal,
-            cycle_length,
-        )?;
-        let current = counts
-            .get(&(request_date.to_string(), squad.to_string(), shift_start.to_string()))
-            .copied()
-            .unwrap_or(0);
-        if current <= night_minimum {
-            return dict_result(
-                py,
-                false,
-                "Would drop night coverage below minimum on a high-risk night",
-                true,
-                Some("night_minimum"),
-                vec![],
-                vec![],
-                None,
-            );
-        }
-    }
 
     let mut maps = OverrideMaps {
         bumped: HashMap::new(),
@@ -272,14 +281,30 @@ pub fn suggest_bump_chain_py(
         }
     }
 
+    let mut assignment_counts: HashMap<i64, i32> = HashMap::new();
+    for (_orig, repl, _cov, _reason) in overrides_on_date {
+        if let Some(r) = repl {
+            *assignment_counts.entry(*r).or_insert(0) += 1;
+        }
+    }
+
     let mut chain: Vec<(i64, i64)> = Vec::new();
     let mut steps: Vec<PyObject> = Vec::new();
-    let mut busy: HashSet<i64> = HashSet::from([original_officer_id]);
     let mut current_id = original_officer_id;
-    let mut current_squad = squad.to_string();
     let mut current_shift = shift_start.to_string();
+    let shift_starts: Vec<String> = shift_times.iter().map(|(s, _)| s.clone()).collect();
+    let officer_rows: Vec<Officer> = officers
+        .iter()
+        .map(|o| Officer {
+            id: o.id,
+            squad: o.squad.clone(),
+            shift_start: o.shift_start.clone(),
+            active: o.active,
+        })
+        .collect();
 
     for _ in 0..max_depth {
+        let chain_replacements: HashSet<i64> = chain.iter().map(|(_, r)| *r).collect();
         let Some(current) = officers.iter().find(|o| o.id == current_id) else {
             return dict_result(
                 py,
@@ -295,20 +320,44 @@ pub fn suggest_bump_chain_py(
 
         let replacement = find_replacement(
             current_id,
-            request_date,
-            &current_squad,
             &current_shift,
             &officers,
-            &busy,
+            &assignment_counts,
+            max_assignments_before_busy,
             &bump_rules,
+            &day_context,
+            &chain_replacements,
             &shift_times,
             &maps,
             base_ordinal,
-            cycle_length,
+            &schedule,
             min_rest_hours,
+            request_date,
         );
 
         let Some(repl) = replacement else {
+            if night_minimum_uncovered(
+                request_date,
+                squad,
+                &current_shift,
+                &officer_rows,
+                overrides_on_date,
+                &shift_starts,
+                base_ordinal,
+                &schedule,
+                night_minimum,
+            ) {
+                return dict_result(
+                    py,
+                    false,
+                    "Cannot cover shift — would drop night coverage below minimum on a high-risk night",
+                    true,
+                    Some("night_minimum"),
+                    steps,
+                    chain,
+                    None,
+                );
+            }
             if chain.is_empty() {
                 return dict_result(
                     py,
@@ -337,17 +386,11 @@ pub fn suggest_bump_chain_py(
             );
         };
 
-        let on_duty = officer_working_on_day(
-            &Officer {
-                id: repl.id,
-                squad: repl.squad.clone(),
-                shift_start: repl.shift_start.clone(),
-                active: repl.active,
-            },
-            req_ord,
-            base_ordinal,
-            cycle_length,
-        );
+        let ctx = day_context.get(&repl.id);
+        let on_duty = ctx.map(|(s, _)| schedule_working(s)).unwrap_or(false);
+        let repl_shift = ctx
+            .and_then(|(_, assigned)| if assigned.is_empty() { None } else { Some(assigned.clone()) })
+            .unwrap_or_else(|| repl.shift_start.clone());
 
         let step = PyDict::new_bound(py);
         step.set_item("step_number", steps.len() + 1)?;
@@ -356,12 +399,12 @@ pub fn suggest_bump_chain_py(
         step.set_item("original_shift", &current_shift)?;
         step.set_item("replacement_officer_id", repl.id)?;
         step.set_item("replacement_officer_name", &repl.name)?;
-        step.set_item("replacement_shift", &repl.shift_start)?;
+        step.set_item("replacement_shift", &repl_shift)?;
         step.set_item("replacement_on_duty", on_duty)?;
         steps.push(step.into());
 
         chain.push((current_id, repl.id));
-        busy.insert(repl.id);
+        *assignment_counts.entry(repl.id).or_insert(0) += 1;
 
         if !on_duty {
             let coverage_end = shift_end_for(&current_shift, &shift_times);
@@ -373,7 +416,7 @@ pub fn suggest_bump_chain_py(
                 &officers,
                 &maps,
                 base_ordinal,
-                cycle_length,
+                &schedule,
                 &shift_times,
             );
             let primary_name = officers
@@ -403,8 +446,7 @@ pub fn suggest_bump_chain_py(
         }
 
         current_id = repl.id;
-        current_squad = repl.squad.clone();
-        current_shift = repl.shift_start.clone();
+        current_shift = repl_shift;
     }
 
     dict_result(

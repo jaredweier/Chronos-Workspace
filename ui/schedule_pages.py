@@ -344,11 +344,11 @@ class SchedulePageMixin:
     def _build_base_schedule(self):
         self._build_monthly_schedule_page("base_schedule", "base")
 
-    def _build_updated_schedule(self):
+    def _build_live_schedule(self):
         self._build_monthly_schedule_page(
-            "updated_schedule",
+            "live_schedule",
             "updated",
-            publish_label="Sync Current Monthly Schedule",
+            publish_label="Publish & Notify Staff",
         )
 
     def _build_monthly_schedule_page(self, page_key: str, schedule_type: str, publish_label: str = ""):
@@ -546,8 +546,9 @@ class SchedulePageMixin:
             self.set_status("Manual coverage override saved")
             if self.current_page == "timeline":
                 self.refresh_gantt()
-            if self.current_page == "updated_schedule":
-                self.refresh_monthly("updated")
+            from ui.helpers import refresh_after_schedule_change
+
+            refresh_after_schedule_change(self)
             self.refresh_notifications()
             self._update_notification_badge()
 
@@ -595,6 +596,17 @@ class SchedulePageMixin:
         status_combo = ctk.CTkComboBox(form, values=list(SNAPSHOT_STATUSES), height=36)
         status_combo.pack(fill="x", pady=(0, 8))
         status_combo.set("working")
+        from logic.shift_assignment import get_shift_band_options
+
+        shift_bands = get_shift_band_options()
+        shift_labels = [f"{s} - {e}" for s, e in shift_bands]
+        ctk.CTkLabel(form, text="Shift band (any officer)", font=font("small"), text_color=UI_TEXT_MUTED).pack(
+            anchor="w"
+        )
+        shift_combo = ctk.CTkComboBox(form, values=shift_labels or ["—"], height=36)
+        shift_combo.pack(fill="x", pady=(0, 8))
+        if shift_labels:
+            shift_combo.set(shift_labels[0])
         ctk.CTkLabel(form, text="Notes", font=font("small"), text_color=UI_TEXT_MUTED).pack(anchor="w")
         notes_entry = ctk.CTkEntry(form, height=36)
         notes_entry.pack(fill="x", pady=(0, 12))
@@ -603,6 +615,12 @@ class SchedulePageMixin:
             officer = off_map.get(off_combo.get())
             if not officer:
                 return
+            shift_start = None
+            shift_end = None
+            if shift_labels and status_combo.get() in ("working", "covering", "swapped", "training"):
+                from validators import parse_officer_shift_ui
+
+                shift_start, shift_end = parse_officer_shift_ui(shift_combo.get())
             result = set_snapshot_assignment(
                 year,
                 month,
@@ -611,10 +629,14 @@ class SchedulePageMixin:
                 officer["id"],
                 status_combo.get(),
                 notes_entry.get().strip(),
+                shift_start=shift_start,
+                shift_end=shift_end,
             )
             if result.get("success"):
+                from ui.helpers import refresh_after_schedule_change
+
                 dialog.destroy()
-                self.refresh_monthly(schedule_type)
+                refresh_after_schedule_change(self)
                 self.set_status("Manual assignment saved")
             else:
                 messagebox.showerror("Error", result.get("message", "Save failed"))
@@ -1034,17 +1056,20 @@ class SchedulePageMixin:
                 )
         else:
             if snapshot:
+                generated = snapshot.get("generated_at", "")[:16].replace("T", " ")
                 state["status_label"].configure(
-                    text=f"Last synced {format_date(snapshot['generated_at'][:10])}",
+                    text=f"Live · auto-updates on approvals · last refresh {generated or '—'}",
                     text_color=DODGEVILLE_SUCCESS,
                 )
             else:
                 state["status_label"].configure(
-                    text="Not synced. Sync to apply time off, bumps, and swaps.",
+                    text="Live schedule will populate when the first change is approved.",
                     text_color=DODGEVILLE_WARNING,
                 )
 
         self._refresh_monthly_sync_cta(state, schedule_type, snapshot, year, month)
+        if schedule_type == "updated":
+            self._refresh_live_today_panel(state, snapshot, year, month)
 
         summary = get_monthly_summary_from_snapshot(snapshot, year, month, schedule_type)
         state["roster_by_date"] = build_monthly_roster_by_date(snapshot, year, month)
@@ -1082,7 +1107,7 @@ class SchedulePageMixin:
             subtitle = (
                 "Rotation plan — fixed after generation"
                 if schedule_type == "base"
-                else "Time off, bumps, swaps, and manual edits"
+                else "Live view — reflects approved time off, bumps, swaps, and coverage"
             )
             SectionHeader(
                 state["scroll"],
@@ -1167,6 +1192,54 @@ class SchedulePageMixin:
             if state.get("selected_entry"):
                 self._refresh_monthly_roster(schedule_type, state["selected_entry"])
 
+    def _refresh_live_today_panel(self, state, snapshot, year: int, month: int) -> None:
+        today = date.today()
+        existing = state.get("live_today_card")
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+            except Exception:
+                pass
+            state["live_today_card"] = None
+        if today.year != year or today.month != month:
+            return
+        roster = get_snapshot_day_roster(snapshot, today) if snapshot else []
+        card = Card(state["scroll"])
+        header = f"Today · {today.strftime('%A, %B %d')}"
+        if not roster:
+            SectionHeader(
+                card.body,
+                header,
+                "No officers scheduled on duty in the live schedule for today.",
+            ).pack(fill="x", padx=CARD_PAD, pady=CARD_PAD)
+        else:
+            SectionHeader(
+                card.body,
+                header,
+                f"{len(roster)} on duty — includes bumps, coverage, and swaps",
+            ).pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, 4))
+            list_frame = ctk.CTkFrame(card.body, fg_color="transparent")
+            list_frame.pack(fill="x", padx=CARD_PAD, pady=(0, CARD_PAD))
+            for item in sorted(roster, key=lambda r: r["officer"].get("name", "")):
+                off = item["officer"]
+                status = item.get("status", "working")
+                color = GANTT_COLORS.get(status, DODGEVILLE_ACCENT)
+                shift = self._shift_time_label(off) or "—"
+                ctk.CTkLabel(
+                    list_frame,
+                    text=f"{off.get('name', 'Officer')}  ·  {shift}  ·  {status}",
+                    font=font("small"),
+                    text_color=color,
+                    anchor="w",
+                ).pack(fill="x", pady=1)
+        children = list(state["scroll"].winfo_children())
+        if children:
+            card.pack(fill="x", pady=(0, 12), before=children[0])
+        else:
+            card.pack(fill="x", pady=(0, 12))
+        state["live_today_card"] = card
+
     def _refresh_monthly_sync_cta(self, state, schedule_type: str, snapshot, year: int, month: int):
         existing = state.get("sync_cta")
         if existing is not None:
@@ -1181,21 +1254,21 @@ class SchedulePageMixin:
         card = Card(state["scroll"])
         SectionHeader(
             card.body,
-            "Current Monthly Schedule Not Synced",
-            "Sync to apply approved time off, bumps, swaps, and manual edits to this month.",
+            "Live Schedule Starting Soon",
+            "Approve a time-off request, bump, or swap and this month will update automatically.",
         ).pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, 8))
         action_row = ctk.CTkFrame(card.body, fg_color="transparent")
         action_row.pack(fill="x", padx=CARD_PAD, pady=(0, CARD_PAD))
         if self.can("schedule.updated.sync"):
             PrimaryButton(
                 action_row,
-                text="Sync Current Monthly Schedule",
+                text="Build Live Schedule Now",
                 command=lambda: self._schedule_action("updated"),
             ).pack(side="left")
         else:
             ctk.CTkLabel(
                 action_row,
-                text="Ask a supervisor to sync the current monthly schedule.",
+                text="Live schedule builds automatically when supervisors approve leave or coverage.",
                 font=font("body"),
                 text_color=UI_TEXT_MUTED,
             ).pack(side="left")

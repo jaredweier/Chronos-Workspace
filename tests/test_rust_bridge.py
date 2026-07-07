@@ -35,6 +35,21 @@ class RustBridgeTests(unittest.TestCase):
             rust_bridge.get_cycle_day(date(2026, 7, 15), ROTATION_BASE_DATE, ROTATION_CYCLE_LENGTH),
         )
 
+    def test_rust_matches_python_custom_squad_schedule_when_built(self):
+        if not rust_bridge.available():
+            self.skipTest("scheduler_core extension not built")
+        schedule = {
+            "mode": "squad_a_days",
+            "cycle_length": 14,
+            "squad_a_days": [1, 2, 3, 4, 5, 6, 7],
+        }
+        import scheduler_core
+
+        for day in range(1, 15):
+            py = "A" if day in schedule["squad_a_days"] else "B"
+            rust = scheduler_core.get_squad_on_duty(day, schedule)
+            self.assertEqual(rust, py, f"day {day}")
+
 
 if __name__ == "__main__":
     unittest.main()

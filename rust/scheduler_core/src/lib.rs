@@ -11,7 +11,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use bump::{OfficerFull, suggest_bump_chain_py};
 use coverage::compute_shift_coverage_counts;
-use rotation::{cycle_day, parse_ymd, squad_on_duty};
+use rotation::{cycle_day, parse_ymd, rotation_schedule_from_py, RotationSchedule};
 use status::{Officer, OverrideMaps, iter_dates, officer_day_status};
 
 #[pyfunction]
@@ -22,8 +22,16 @@ fn get_cycle_day(base_date: &str, target_date: &str, cycle_length: i32) -> PyRes
 }
 
 #[pyfunction]
-fn get_squad_on_duty(cycle_day: i32) -> &'static str {
-    squad_on_duty(cycle_day)
+#[pyo3(signature = (cycle_day, rotation_schedule=None))]
+fn get_squad_on_duty(
+    cycle_day: i32,
+    rotation_schedule: Option<&Bound<'_, PyDict>>,
+) -> PyResult<String> {
+    let schedule = match rotation_schedule {
+        Some(dict) => rotation_schedule_from_py(dict)?,
+        None => RotationSchedule::dodgeville_default(),
+    };
+    Ok(schedule.squad_on_duty(cycle_day).to_string())
 }
 
 #[pyfunction]
@@ -38,8 +46,11 @@ fn build_schedule_matrix(
     end_date: &str,
     base_date: &str,
     cycle_length: i32,
+    rotation_schedule: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
     let base_ord = parse_ymd(base_date)?;
+    let mut schedule = rotation_schedule_from_py(rotation_schedule)?;
+    schedule.cycle_length = cycle_length;
     let maps = py_maps_to_rust(bumped, covering, swapped, bumped_status)?;
     let dates = iter_dates(start_date, end_date)?;
 
@@ -71,7 +82,7 @@ fn build_schedule_matrix(
     for (off_py, off) in &officer_rows {
         let day_map = PyDict::new_bound(py);
         for (date_key, ord) in &dates {
-            let status = officer_day_status(off, date_key, *ord, base_ord, cycle_length, &maps);
+            let status = officer_day_status(off, date_key, *ord, base_ord, &schedule, &maps);
             day_map.set_item(date_key, status)?;
         }
         let entry = PyDict::new_bound(py);
@@ -145,7 +156,7 @@ fn compute_coverage_counts(
 }
 
 #[pyfunction]
-#[pyo3(signature = (officers, overrides_on_date, original_officer_id, request_date, squad, shift_start, bump_rules, shift_times, night_minimum=2, min_rest_hours=8.0, base_date="2026-06-28", cycle_length=14, max_depth=8))]
+#[pyo3(signature = (officers, overrides_on_date, original_officer_id, request_date, squad, shift_start, bump_rules, shift_times, schedule_context, night_minimum=2, min_rest_hours=8.0, base_date="2026-06-28", cycle_length=14, rotation_schedule=None, max_assignments_before_busy=2, max_depth=8))]
 fn suggest_bump_chain(
     py: Python<'_>,
     officers: &Bound<'_, PyList>,
@@ -154,15 +165,23 @@ fn suggest_bump_chain(
     request_date: &str,
     squad: &str,
     shift_start: &str,
-    bump_rules: HashMap<i32, Vec<i32>>,
+    bump_rules: HashMap<String, Vec<String>>,
     shift_times: Vec<(String, String)>,
+    schedule_context: &Bound<'_, PyDict>,
     night_minimum: i32,
     min_rest_hours: f64,
     base_date: &str,
     cycle_length: i32,
+    rotation_schedule: Option<&Bound<'_, PyDict>>,
+    max_assignments_before_busy: i32,
     max_depth: usize,
 ) -> PyResult<PyObject> {
     let base_ord = parse_ymd(base_date)?;
+    let mut schedule = match rotation_schedule {
+        Some(dict) => rotation_schedule_from_py(dict)?,
+        None => RotationSchedule::dodgeville_default(),
+    };
+    schedule.cycle_length = cycle_length;
     let officer_rows: Vec<OfficerFull> = officers
         .iter()
         .map(|item| {
@@ -194,6 +213,23 @@ fn suggest_bump_chain(
         ));
     }
 
+    let mut day_context: HashMap<i64, (String, String)> = HashMap::new();
+    for (key, value) in schedule_context.iter() {
+        let officer_id: i64 = key.extract()?;
+        let ctx: &Bound<'_, PyDict> = value.downcast()?;
+        let status: String = ctx
+            .get_item("status")?
+            .unwrap()
+            .extract()
+            .unwrap_or_else(|_| "off".to_string());
+        let assigned_start: String = ctx
+            .get_item("shift_start")?
+            .unwrap()
+            .extract()
+            .unwrap_or_default();
+        day_context.insert(officer_id, (status, assigned_start));
+    }
+
     suggest_bump_chain_py(
         py,
         officer_rows,
@@ -204,10 +240,12 @@ fn suggest_bump_chain(
         shift_start,
         bump_rules,
         shift_times,
+        day_context,
         night_minimum,
         min_rest_hours,
         base_ord,
-        cycle_length,
+        schedule,
+        max_assignments_before_busy,
         max_depth,
     )
 }

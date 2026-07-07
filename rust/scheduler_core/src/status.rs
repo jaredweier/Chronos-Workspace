@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
 
-use crate::rotation::{cycle_day, parse_ymd, squad_on_duty};
+use crate::rotation::{cycle_day, parse_ymd, RotationSchedule};
 
 #[derive(Clone)]
 pub struct Officer {
@@ -23,13 +23,13 @@ pub fn officer_working_on_day(
     officer: &Officer,
     target_ordinal: i32,
     base_ordinal: i32,
-    cycle_length: i32,
+    schedule: &RotationSchedule,
 ) -> bool {
     if !officer.active || officer.squad.is_empty() || officer.shift_start.is_empty() {
         return false;
     }
-    let day = cycle_day(base_ordinal, target_ordinal, cycle_length);
-    officer.squad == squad_on_duty(day)
+    let day = cycle_day(base_ordinal, target_ordinal, schedule.cycle_length);
+    schedule.is_squad_working(&officer.squad, day)
 }
 
 pub fn officer_day_status(
@@ -37,7 +37,7 @@ pub fn officer_day_status(
     date_key: &str,
     target_ordinal: i32,
     base_ordinal: i32,
-    cycle_length: i32,
+    schedule: &RotationSchedule,
     maps: &OverrideMaps,
 ) -> String {
     let id = officer.id;
@@ -65,7 +65,7 @@ pub fn officer_day_status(
     {
         return "covering".to_string();
     }
-    if officer_working_on_day(officer, target_ordinal, base_ordinal, cycle_length) {
+    if officer_working_on_day(officer, target_ordinal, base_ordinal, schedule) {
         return "working".to_string();
     }
     "off".to_string()
