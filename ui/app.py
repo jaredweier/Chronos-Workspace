@@ -7,6 +7,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from ui.admin_pages import AdminPageMixin
+from ui.banked_time_pages import BankedTimePageMixin
 from ui.dashboard_pages import DashboardPageMixin
 from ui.feature_pages import AvailabilityPageMixin, ReportsPageMixin
 from ui.notifications_pages import NotificationsPageMixin
@@ -34,6 +35,7 @@ class DodgevilleSchedulerApp(
     RequestsPageMixin,
     SchedulePageMixin,
     PayrollPageMixin,
+    BankedTimePageMixin,
     SimulatorPageMixin,
     NotificationsPageMixin,
     OfficersPageMixin,
@@ -64,6 +66,8 @@ class DodgevilleSchedulerApp(
         self._payroll_row_widgets = {}
         self._payroll_period_start: Optional[date] = None
         self._timecard_period_start: Optional[date] = None
+        self._timecard_scope: str = "pay_period"
+        self._timecard_scope_reference: Optional[date] = None
         self._swap_row_widgets = {}
         self._request_view = "queue"
         self._monthly_selected_day = None

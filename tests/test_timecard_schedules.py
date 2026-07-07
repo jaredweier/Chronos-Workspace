@@ -10,6 +10,9 @@ from tests.helpers import get_any_officer, test_database
 class TimecardScheduleTests(unittest.TestCase):
     def test_permissions_stub(self):
         self.assertTrue(role_has_permission("Officer", "timecard.edit_own"))
+        self.assertTrue(role_has_permission("Officer", "timecard.submit"))
+        self.assertFalse(role_has_permission("Officer", "timecard.approve"))
+        self.assertTrue(role_has_permission("Supervisor", "timecard.approve"))
         self.assertFalse(role_has_permission("Officer", "schedule.base.publish"))
         self.assertFalse(role_has_permission("Officer", "reports.view"))
         self.assertFalse(role_has_permission("Officer", "database.backup"))
@@ -54,10 +57,11 @@ class TimecardScheduleTests(unittest.TestCase):
 
             import logic
 
-            start, end = logic.get_pay_period(date(2026, 6, 30))
-            self.assertEqual(start, date(2026, 6, 22))
-            self.assertEqual(end, date(2026, 7, 5))
-            rot_start, _ = logic.get_current_cycle_window(date(2026, 6, 30))
+            start, end = logic.get_pay_period(date(2026, 7, 10))
+            self.assertEqual(start, date(2026, 7, 6))
+            self.assertEqual(end, date(2026, 7, 19))
+            self.assertEqual((end - start).days, 13)
+            rot_start, _ = logic.get_current_cycle_window(date(2026, 7, 10))
             self.assertNotEqual(start, rot_start)
 
     def test_pay_period_navigation(self):
@@ -66,13 +70,14 @@ class TimecardScheduleTests(unittest.TestCase):
 
             import logic
 
-            start, end = logic.get_pay_period(date(2026, 6, 30))
+            start, end = logic.get_pay_period(date(2026, 7, 10))
             prev_start, prev_end = logic.get_adjacent_pay_period(start, -1)
             self.assertEqual((prev_end - prev_start).days, 13)
-            self.assertEqual(prev_start, date(2026, 6, 8))
+            self.assertEqual(prev_start, date(2026, 6, 22))
+            self.assertEqual(prev_end, date(2026, 7, 5))
             next_start, _ = logic.get_adjacent_pay_period(start, 1)
-            self.assertEqual(next_start, date(2026, 7, 6))
-            ref = date(2026, 6, 30)
+            self.assertEqual(next_start, date(2026, 7, 20))
+            ref = date(2026, 7, 10)
             self.assertFalse(logic.is_future_pay_period(start, reference=ref))
             self.assertTrue(logic.is_future_pay_period(next_start, reference=ref))
 
@@ -83,21 +88,49 @@ class TimecardScheduleTests(unittest.TestCase):
             import logic
 
             officer = get_any_officer("A")
-            period_end = date(2026, 7, 5)
+            shift_start_day = date(2026, 7, 5)
             result = logic.save_timecard_entry(
                 officer["id"],
-                period_end.isoformat(),
+                shift_start_day.isoformat(),
                 11.0,
-                time_in="19:00",
+                time_in="22:00",
                 time_out="06:00",
             )
             self.assertTrue(result["success"], result.get("message"))
             self.assertTrue(result.get("overnight"))
 
-            data = logic.get_timecard_period(officer["id"], date(2026, 6, 22))
-            july5 = next(d for d in data["days"] if d["entry_date"] == period_end.isoformat())
+            prior_period = logic.get_pay_period(shift_start_day)
+            self.assertEqual(prior_period[0], date(2026, 6, 22))
+            data = logic.get_timecard_period(officer["id"], prior_period[0])
+            july5 = next(d for d in data["days"] if d["entry_date"] == shift_start_day.isoformat())
             self.assertTrue(july5.get("overnight"))
             self.assertEqual(july5["hours_worked"], 11.0)
+
+            next_period = logic.get_pay_period(date(2026, 7, 6))
+            self.assertEqual(next_period[0], date(2026, 7, 6))
+            next_data = logic.get_timecard_period(officer["id"], next_period[0])
+            self.assertFalse(
+                any(
+                    e.get("timecard_id")
+                    for d in next_data["days"]
+                    if d["entry_date"] == shift_start_day.isoformat()
+                    for e in d.get("entries", [])
+                )
+            )
+
+    def test_search_pay_period_by_date(self):
+        with test_database():
+            import logic
+
+            result = logic.search_pay_period_by_date("05-07-2026")
+            self.assertTrue(result["success"], result.get("message"))
+            self.assertEqual(result["period_start"], "2026-06-22")
+            self.assertEqual(result["period_end"], "2026-07-05")
+
+            catalog = logic.list_pay_periods_catalog()
+            self.assertTrue(catalog["success"])
+            self.assertGreaterEqual(len(catalog["periods"]), 1)
+            self.assertTrue(any(p.get("is_current") for p in catalog["periods"]))
 
     def test_timecard_save_and_import(self):
         with test_database():
@@ -185,16 +218,46 @@ class TimecardScheduleTests(unittest.TestCase):
             self.assertEqual(snapshot["locked"], 1)
             self.assertGreater(len(snapshot["rows"]), 0)
 
+            from logic.staffing_config import get_active_shift_time_values
+
             officer = logic.get_officers_by_seniority()[0]
             work_rows = [r for r in snapshot["rows"] if r["officer_id"] == officer["id"] and r["status"] == "working"]
             self.assertGreater(len(work_rows), 0)
+            active_bands = get_active_shift_time_values()
             for row in work_rows:
-                self.assertEqual(row["shift_start"], officer["shift_start"])
-                self.assertEqual(row["shift_end"], officer["shift_end"])
+                band = (row["assigned_shift_start"], row["assigned_shift_end"])
+                self.assertIn(band, active_bands)
 
             again = logic.ensure_original_monthly_schedule(year, month)
             self.assertTrue(again["success"])
             self.assertFalse(again.get("created"))
+
+    def test_live_schedule_auto_updates_on_day_off_approve(self):
+        with test_database():
+            import logic
+            from tests.helpers import get_any_officer, off_date_for_squad
+
+            officer = get_any_officer("A", "06:00")
+            off_day = off_date_for_squad("A")
+            year, month = off_day.year, off_day.month
+            request_date = off_day.strftime("%Y-%m-%d")
+            logic.ensure_original_monthly_schedule(year, month)
+            before = logic.get_schedule_snapshot(year, month, "updated")
+            self.assertIsNone(before)
+
+            created = logic.create_day_off_request(officer["id"], request_date, "Vacation")
+            self.assertTrue(created["success"])
+            result = logic.process_day_off_request(created["request_id"], "approve")
+            self.assertTrue(result.success, result.message)
+
+            live = logic.get_schedule_snapshot(year, month, "updated")
+            self.assertIsNotNone(live)
+            self.assertGreater(len(live.get("rows", [])), 0)
+            bumped = [
+                r for r in live["rows"] if r["officer_id"] == officer["id"] and r["assignment_date"] == request_date
+            ]
+            self.assertEqual(len(bumped), 1)
+            self.assertNotEqual(bumped[0]["status"], "working")
 
     def test_publish_base_and_sync_updated(self):
         with test_database():
@@ -380,6 +443,86 @@ class TimecardScheduleTests(unittest.TestCase):
                 from validators import format_date
 
                 self.assertIn(format_date(period_start), content)
+
+    def test_timecard_prefill_from_live_schedule_after_day_off(self):
+        with test_database():
+            import logic
+            from tests.helpers import get_any_officer, off_date_for_squad
+
+            officer = get_any_officer("A", "06:00")
+            off_day = off_date_for_squad("A")
+            logic.ensure_original_monthly_schedule(off_day.year, off_day.month)
+            request_date = off_day.strftime("%Y-%m-%d")
+            created = logic.create_day_off_request(officer["id"], request_date, "Vacation")
+            self.assertTrue(created["success"])
+            result = logic.process_day_off_request(created["request_id"], "approve")
+            self.assertTrue(result.success, result.message)
+
+            live = logic.get_officer_live_schedule_day(officer["id"], off_day)
+            self.assertFalse(live["scheduled"])
+            self.assertIn(live["status"], ("leave", "bumped"))
+
+            period_start, _ = logic.get_pay_period(off_day)
+            prefill = logic.prefill_timecard_from_schedule(officer["id"], period_start)
+            self.assertTrue(prefill["success"], prefill.get("message"))
+
+            data = logic.get_timecard_period(officer["id"], period_start)
+            day_row = next(d for d in data["days"] if d["entry_date"] == request_date)
+            self.assertTrue(any(e.get("timecard_id") for e in day_row["entries"]))
+
+    def test_timecard_approval_blocks_officer_edits(self):
+        with test_database():
+            import logic
+
+            officer = get_any_officer("A")
+            period_start, _ = logic.get_pay_period()
+            day = period_start.isoformat()
+            saved = logic.save_timecard_entry(officer["id"], day, 8.0)
+            self.assertTrue(saved["success"], saved.get("message"))
+            approved = logic.approve_timecard_period(officer["id"], period_start, user_id=1)
+            self.assertTrue(approved["success"], approved.get("message"))
+
+            blocked = logic.save_timecard_entry(
+                officer["id"],
+                day,
+                7.5,
+                timecard_id=saved["timecard_id"],
+            )
+            self.assertFalse(blocked["success"])
+            self.assertIn("approved", blocked["message"].lower())
+
+            override = logic.save_timecard_entry(
+                officer["id"],
+                day,
+                7.5,
+                timecard_id=saved["timecard_id"],
+                override_approval=True,
+            )
+            self.assertTrue(override["success"], override.get("message"))
+
+    def test_timecard_submit_and_supervisor_approve(self):
+        with test_database():
+            import logic
+            from seed_data import seed_users_if_empty
+
+            seed_users_if_empty()
+            officer = get_any_officer("A")
+            period_start, _ = logic.get_pay_period()
+            logic.save_timecard_entry(officer["id"], period_start.isoformat(), 8.0)
+            submitted = logic.submit_timecard_for_approval(officer["id"], period_start)
+            self.assertTrue(submitted["success"], submitted.get("message"))
+            approval = logic.get_timecard_approval(officer["id"], period_start)
+            self.assertEqual(approval["status"], "Submitted")
+
+            approved = logic.approve_timecard_period(officer["id"], period_start, user_id=1)
+            self.assertTrue(approved["success"], approved.get("message"))
+            self.assertTrue(logic.is_timecard_period_approved(officer["id"], period_start))
+
+            summary = logic.list_timecard_approvals_for_period(period_start)
+            self.assertTrue(summary["success"])
+            row = next(r for r in summary["rows"] if r["officer_id"] == officer["id"])
+            self.assertEqual(row["status"], "Approved")
+            self.assertGreaterEqual(row["total_hours"], 8.0)
 
     def test_export_timecard_csv(self):
         with test_database():

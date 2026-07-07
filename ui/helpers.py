@@ -143,6 +143,54 @@ def refresh_all_officer_dropdowns(app) -> None:
         app._refresh_dashboard_data()
 
 
+def refresh_after_staffing_change(app) -> None:
+    """Re-read shift/staffing settings and refresh dependent views."""
+    refresh_shift = getattr(app, "_refresh_officer_shift_options", None)
+    if callable(refresh_shift):
+        refresh_shift()
+    refresh_after_rotation_change(app)
+
+
+def refresh_after_schedule_change(app) -> None:
+    """Refresh live schedule, timeline, dashboard, and timecard after schedule changes."""
+    refresh_gantt = getattr(app, "refresh_gantt", None)
+    if callable(refresh_gantt):
+        refresh_gantt()
+    refresh_monthly = getattr(app, "refresh_monthly", None)
+    if callable(refresh_monthly):
+        try:
+            refresh_monthly("updated")
+        except Exception:
+            pass
+    if getattr(app, "current_page", None) == "timecard":
+        refresh_timecard = getattr(app, "refresh_timecard", None)
+        if callable(refresh_timecard):
+            try:
+                refresh_timecard()
+            except Exception:
+                pass
+    if hasattr(app, "_refresh_dashboard_data"):
+        app._refresh_dashboard_data()
+    if getattr(app, "current_page", None) == "dashboard" and hasattr(app, "_refresh_dashboard"):
+        app._refresh_dashboard()
+
+
+def refresh_after_rotation_change(app) -> None:
+    """Re-read rotation from DB and refresh every view that depends on cycle/squad duty."""
+    if hasattr(app, "_update_sidebar_date"):
+        app._update_sidebar_date()
+    refresh_after_schedule_change(app)
+    refresh_monthly = getattr(app, "refresh_monthly", None)
+    if callable(refresh_monthly):
+        try:
+            refresh_monthly("base")
+        except Exception:
+            pass
+    refresh_reports = getattr(app, "refresh_reports", None)
+    if callable(refresh_reports):
+        refresh_reports()
+
+
 def active_officers():
     return [o for o in get_officers_by_seniority() if o.get("active") == 1]
 

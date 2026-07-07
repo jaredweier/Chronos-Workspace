@@ -6,7 +6,7 @@ Dodgeville Police Department Scheduler - Admin CLI
 import argparse
 from datetime import date
 
-from config import DAY_OFF_REQUEST_TYPES, OFFICER_TITLE_OPTIONS
+from config import DAY_OFF_REQUEST_TYPES
 from database import backup_database
 from logic import (
     add_holiday,
@@ -44,6 +44,7 @@ from logic import (
     get_day_off_requests,
     get_department_setting,
     get_holidays,
+    get_labor_compliance_report,
     get_notifications,
     get_officer_availability,
     get_officers_by_seniority,
@@ -106,7 +107,43 @@ def list_officers():
         )
 
 
+def _validate_cli_job_title(job_title: str) -> bool:
+    from validators import validate_officer_job_title
+
+    if not job_title:
+        return True
+    check = validate_officer_job_title(job_title)
+    if not check.ok:
+        print(f"Error: {check.message}")
+        return False
+    return True
+
+
+def list_officer_titles_cmd(_args):
+    from logic import get_builtin_officer_titles, get_custom_officer_titles, get_officer_title_options
+
+    print("Standard titles:", ", ".join(get_builtin_officer_titles()))
+    custom = get_custom_officer_titles()
+    if custom:
+        print("Custom titles:", ", ".join(custom))
+    else:
+        print("Custom titles: (none)")
+    print("All assignable:", ", ".join(get_officer_title_options()))
+
+
+def add_officer_title_cmd(args):
+    from logic import add_custom_officer_title
+
+    result = add_custom_officer_title(args.title)
+    if result.get("success"):
+        print(result.get("message", "Title added"))
+    else:
+        print(f"Error: {result.get('message', 'Unknown error')}")
+
+
 def add_officer(args):
+    if args.job_title and not _validate_cli_job_title(args.job_title):
+        return
     result = logic_add_officer(
         args.name,
         args.seniority,
@@ -127,6 +164,8 @@ def add_officer(args):
 
 
 def update_officer_cmd(args):
+    if args.job_title and not _validate_cli_job_title(args.job_title):
+        return
     fields = {}
     for key in (
         "name",
@@ -258,6 +297,59 @@ def get_setting_cmd(args):
 def set_setting_cmd(args):
     result = set_department_setting(args.key, args.value)
     print("Setting saved." if result.get("success") else f"Error: {result.get('message')}")
+
+
+def staffing_settings_cmd(args):
+    from logic.staffing_config import get_staffing_config, save_staffing_settings
+
+    if args.staffing_action == "show":
+        config = get_staffing_config()
+        print(f"Shift length: {config['shift_length_hours']} hours")
+        print(f"Annual hours target: {config['annual_hours_target']}")
+        print(f"Shift count: {config['shift_count']}")
+        print(f"Target officers: {config['target_officer_count']} (active roster: {config['active_officer_count']})")
+        print(f"Shift starts: {', '.join(config['shift_starts'])}")
+        for band in config["shift_times"]:
+            print(f"  {band['start']} – {band['end']}")
+        return
+    if args.staffing_action == "set":
+        result = save_staffing_settings(
+            shift_length_hours=args.shift_length,
+            annual_hours_target=args.annual_hours,
+            shift_count=args.shift_count,
+            target_officer_count=args.target_officers,
+            shift_starts_text=args.shift_starts or "",
+        )
+        if result.get("success"):
+            print(result.get("message", "Staffing saved."))
+        else:
+            print(f"Error: {result.get('message')}")
+
+
+def rotation_settings_cmd(args):
+    from logic.rotation_config import get_rotation_config, save_rotation_settings
+
+    if args.rotation_action == "show":
+        config = get_rotation_config()
+        print(f"Preset: {config['preset']}")
+        print(f"Cycle length: {config['cycle_length']} days")
+        print(f"Base date: {config['base_date']}")
+        print(f"Squad A days: {config['squad_a_days']}")
+        print(f"Schedule mode: {config.get('rust_schedule_mode')}")
+        start, end = get_current_cycle_window()
+        print(f"Current cycle: {format_date(start)} – {format_date(end)}")
+        return
+    if args.rotation_action == "set":
+        result = save_rotation_settings(
+            cycle_length=args.cycle_length,
+            preset=args.preset,
+            base_date_text=args.base_date or "",
+            squad_a_days_text=args.squad_a_days or "",
+        )
+        if result.get("success"):
+            print(result.get("message", "Rotation saved."))
+        else:
+            print(f"Error: {result.get('message')}")
 
 
 def backup():
@@ -443,6 +535,23 @@ def add_holiday_cmd(args):
         print(f"Error: {result.get('message')}")
 
 
+def reports_labor_compliance(args):
+    report = get_labor_compliance_report(officer_id=args.officer_id)
+    scope = f" (officer {args.officer_id})" if args.officer_id else ""
+    print(f"Labor compliance{scope}")
+    print(
+        f"§207(k) {report.get('flsa_207k_period_days')}-day period "
+        f"{report.get('flsa_207k_period_start')} – {report.get('flsa_207k_period_end')} "
+        f"(threshold {report.get('flsa_207k_threshold')}h, rotation {report.get('rotation_cycle_length')}d)"
+    )
+    print(
+        f"Comp cap: {report.get('comp_cap_hours')}h  |  Max consecutive days: {report.get('max_consecutive_work_days')}"
+    )
+    print(f"Issues: {report.get('issue_count', 0)}")
+    for item in report.get("issues", []):
+        print(f"  [{item.get('severity', '?').upper()}] {item['officer_name']}: {item['message']}")
+
+
 def reports_summary(args):
     insights = get_dashboard_insights(officer_id=args.officer_id)
     scope = f" (officer {args.officer_id})" if args.officer_id else ""
@@ -453,6 +562,7 @@ def reports_summary(args):
     print(f"Schedule changes (month): {insights.get('schedule_diff_count', 0)}")
     print(f"Pending requests: {insights.get('pending_requests', 0)}")
     print(f"Pending swaps: {insights.get('pending_swaps', 0)}")
+    print(f"Labor compliance issues: {insights.get('labor_compliance_count', 0)}")
     if insights.get("officer_scoped"):
         print(f"Pending manual review: {insights.get('pending_manual_review', 0)}")
         print(f"Claimable open shifts: {insights.get('claimable_open_shifts', 0)}")
@@ -797,7 +907,7 @@ def main():
     add.add_argument("--email")
     add.add_argument("--phone")
     add.add_argument("--address")
-    add.add_argument("--job-title", choices=OFFICER_TITLE_OPTIONS, help="Roster title")
+    add.add_argument("--job-title", help="Roster title (standard or supervisor-added custom)")
 
     update = officers_sub.add_parser("update", help="Update an officer")
     update.add_argument("officer_id", type=int)
@@ -811,11 +921,17 @@ def main():
     update.add_argument("--email")
     update.add_argument("--phone")
     update.add_argument("--address")
-    update.add_argument("--job-title", choices=OFFICER_TITLE_OPTIONS, dest="job_title")
+    update.add_argument("--job-title", dest="job_title", help="Roster title (standard or custom)")
     update.add_argument("--active", type=int, choices=[0, 1])
 
     delete = officers_sub.add_parser("delete", help="Delete an officer without scheduling history")
     delete.add_argument("officer_id", type=int)
+
+    titles = officers_sub.add_parser("titles", help="Manage assignable roster titles")
+    titles_sub = titles.add_subparsers(dest="titles_action")
+    titles_sub.add_parser("list", help="List standard and custom titles")
+    titles_add = titles_sub.add_parser("add", help="Add a custom title")
+    titles_add.add_argument("title", help="New title name")
 
     imp = officers_sub.add_parser("import", help="Import roster from CSV (export format)")
     imp.add_argument("--file", required=True, help="Path to roster CSV file")
@@ -988,6 +1104,23 @@ def main():
     set_set = set_sub.add_parser("set", help="Set a setting value")
     set_set.add_argument("key")
     set_set.add_argument("value")
+    set_rot = set_sub.add_parser("rotation", help="Show or update rotation schedule")
+    rot_sub = set_rot.add_subparsers(dest="rotation_action")
+    rot_sub.add_parser("show", help="Show active rotation configuration")
+    rot_set = rot_sub.add_parser("set", help="Save rotation schedule (applies department-wide)")
+    rot_set.add_argument("--cycle-length", type=int, required=True, help="7–28 days")
+    rot_set.add_argument("--preset", required=True, help="Rotation preset name")
+    rot_set.add_argument("--base-date", default="", help="Cycle anchor DD-MM-YYYY (optional)")
+    rot_set.add_argument("--squad-a-days", default="", help="Optional Squad A on-duty days")
+    set_staff = set_sub.add_parser("staffing", help="Show or update shift and staffing configuration")
+    staff_sub = set_staff.add_subparsers(dest="staffing_action")
+    staff_sub.add_parser("show", help="Show active staffing configuration")
+    staff_set = staff_sub.add_parser("set", help="Save staffing configuration")
+    staff_set.add_argument("--shift-length", type=float, required=True, help="Hours per shift")
+    staff_set.add_argument("--annual-hours", type=float, required=True, help="Department annual hours target")
+    staff_set.add_argument("--shift-count", type=int, required=True, help="Number of shift bands")
+    staff_set.add_argument("--target-officers", type=int, required=True, help="Target roster size")
+    staff_set.add_argument("--shift-starts", default="", help="Comma-separated HH:MM start times")
 
     # Reports
     reports = subparsers.add_parser("reports", help="Analytics and summaries")
@@ -1003,6 +1136,8 @@ def main():
     rep_conf.add_argument("--start", help="DD-MM-YYYY")
     rep_conf.add_argument("--end", help="DD-MM-YYYY")
     rep_conf.add_argument("--officer-id", type=int, help="Limit to one officer")
+    rep_lc = rep_sub.add_parser("labor-compliance", help="FLSA §207(k), comp cap, consecutive-day alerts")
+    rep_lc.add_argument("--officer-id", type=int, help="Limit to one officer")
 
     # Schedule diff
     sched_diff = subparsers.add_parser("schedule-diff", help="Compare base vs updated schedule")
@@ -1108,6 +1243,11 @@ def main():
             delete_officer_cmd(args)
         elif args.action == "import":
             import_officers_cmd(args)
+        elif args.action == "titles":
+            if args.titles_action == "list":
+                list_officer_titles_cmd(args)
+            elif args.titles_action == "add":
+                add_officer_title_cmd(args)
     elif args.command == "requests":
         if args.action == "pending":
             list_pending_requests()
@@ -1188,6 +1328,10 @@ def main():
             get_setting_cmd(args)
         elif args.action == "set":
             set_setting_cmd(args)
+        elif args.action == "rotation":
+            rotation_settings_cmd(args)
+        elif args.action == "staffing":
+            staffing_settings_cmd(args)
     elif args.command == "reports":
         if args.action == "summary":
             reports_summary(args)
@@ -1208,6 +1352,8 @@ def main():
                 print(
                     f"  {c['unavailable_date']}  {c['officer_name']}  ({c['schedule_status']})  {c.get('reason') or ''}"
                 )
+        elif args.action == "labor-compliance":
+            reports_labor_compliance(args)
     elif args.command == "schedule-diff":
         schedule_diff_cmd(args)
     elif args.command == "csv":

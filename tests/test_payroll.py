@@ -21,6 +21,21 @@ class TestPayroll(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["entry_type"], "Overtime Earned")
 
+    def test_night_differential_after_multiplier(self):
+        with test_database():
+            import logic
+
+            calc = logic.calculate_pay_for_entry(
+                "Overtime Earned",
+                8.0,
+                30.0,
+                night_differential_hours=4.0,
+                night_differential_rate=1.5,
+            )
+            self.assertEqual(calc.overtime_pay, round(8.0 * 30.0 * 1.5, 2))
+            self.assertEqual(calc.night_differential_pay, round(4.0 * 1.5, 2))
+            self.assertEqual(calc.total_pay, round(calc.overtime_pay + calc.night_differential_pay, 2))
+
     def test_holiday_pay_multiplier(self):
         with test_database():
             import logic

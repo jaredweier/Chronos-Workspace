@@ -10,6 +10,8 @@ PERMISSIONS: Dict[str, Tuple[str, ...]] = {
     "timecard.edit_own": USER_ROLES,
     "timecard.view_all": ("Supervisor", "Administration"),
     "timecard.edit_all": ("Supervisor", "Administration"),
+    "timecard.submit": USER_ROLES,
+    "timecard.approve": ("Supervisor", "Administration"),
     "payroll.view_own": USER_ROLES,
     "payroll.view_all": ("Supervisor", "Administration"),
     "payroll.edit": ("Supervisor", "Administration"),

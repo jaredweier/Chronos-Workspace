@@ -6,19 +6,21 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 from config import (
+    FLSA_207K_ENABLED,
     FLSA_HOURS_WARN_PCT,
+    FLSA_LE_WEEKLY_THRESHOLD,
     FLSA_WEEKLY_THRESHOLD,
     NIGHT_MINIMUM_OFFICERS,
-    SHIFT_TIMES,
     is_high_risk_night,
 )
 from database import get_connection
+from logic.staffing_config import get_active_shift_times
 from paths import data_path, ensure_data_dirs
 from validators import applies_night_minimum, format_date, format_row_dates, parse_date
 
 
 def _shift_starts() -> List[str]:
-    return [start for start, _ in SHIFT_TIMES.values()]
+    return [start for start, _ in get_active_shift_times().values()]
 
 
 def get_coverage_report(start_date: date, end_date: date) -> Dict:
@@ -76,7 +78,7 @@ def get_coverage_gap_board(hours_ahead: int = 48) -> Dict:
     today = date.today()
     end = today + timedelta(days=max(1, hours_ahead // 24))
     coverage = get_shift_coverage_counts_for_range(today, end)
-    shift_ends = {start: end for start, end in SHIFT_TIMES.values()}
+    shift_ends = {start: end for start, end in get_active_shift_times().values()}
 
     gaps = []
     current = today
@@ -254,9 +256,14 @@ def get_hours_watch(
         weekly_threshold = float(get_department_setting("flsa_weekly_threshold", str(FLSA_WEEKLY_THRESHOLD)))
     except ValueError:
         weekly_threshold = FLSA_WEEKLY_THRESHOLD
+    try:
+        le_weekly_threshold = float(get_department_setting("flsa_le_weekly_threshold", str(FLSA_LE_WEEKLY_THRESHOLD)))
+    except ValueError:
+        le_weekly_threshold = FLSA_LE_WEEKLY_THRESHOLD
 
     period_warn = period_threshold * FLSA_HOURS_WARN_PCT
     weekly_warn = weekly_threshold * FLSA_HOURS_WARN_PCT
+    le_weekly_warn = le_weekly_threshold * FLSA_HOURS_WARN_PCT
 
     sheets = get_payroll_period_timesheets(period_start)
     period_hours_by_officer = {
@@ -291,6 +298,7 @@ def get_hours_watch(
         week_hours = week_hours_map.get(oid, 0.0)
         issues = []
         severity = None
+        flsa_207k_hours = None
         if period_hours >= period_threshold:
             issues.append(f"pay period {period_hours:.1f}h ≥ {period_threshold:.0f}h")
             severity = "critical"
@@ -303,6 +311,23 @@ def get_hours_watch(
         elif week_hours >= weekly_warn:
             issues.append(f"work week {week_hours:.1f}h approaching {weekly_threshold:.0f}h FLSA")
             severity = severity or "warning"
+        if week_hours >= le_weekly_threshold:
+            issues.append(f"work week {week_hours:.1f}h ≥ {le_weekly_threshold:.0f}h LE §207(k) weekly")
+            severity = "critical"
+        elif week_hours >= le_weekly_warn:
+            issues.append(f"work week {week_hours:.1f}h approaching {le_weekly_threshold:.0f}h LE weekly")
+            severity = severity or "warning"
+        if FLSA_207K_ENABLED:
+            from logic.labor_compliance import get_flsa_207k_status
+
+            flsa_207k = get_flsa_207k_status(oid)
+            flsa_207k_hours = flsa_207k["hours"]
+            if flsa_207k["severity"] == "critical":
+                issues.append(flsa_207k["message"])
+                severity = "critical"
+            elif flsa_207k["severity"] == "warning":
+                issues.append(flsa_207k["message"])
+                severity = severity or "warning"
         if issues:
             warnings.append(
                 {
@@ -313,6 +338,8 @@ def get_hours_watch(
                     "week_hours": round(week_hours, 2),
                     "period_threshold": period_threshold,
                     "weekly_threshold": weekly_threshold,
+                    "le_weekly_threshold": le_weekly_threshold,
+                    "flsa_207k_hours": flsa_207k_hours,
                     "message": "; ".join(issues),
                     "severity": severity,
                 }
@@ -487,6 +514,10 @@ def get_pay_stub_preview(officer_id: int, period_start: Optional[date] = None) -
     other_hours = sheet["total_hours"] - regular_hours
     gross = sheet["total_pay"]
     rate = officer.get("pay_rate") or 0.0
+    from logic.payroll import project_officer_annual_pay
+
+    salary = project_officer_annual_pay(officer_id)
+    scheduled_salary = salary.get("per_pay_period_salary") if salary.get("success") else None
 
     return {
         "success": True,
@@ -498,6 +529,8 @@ def get_pay_stub_preview(officer_id: int, period_start: Optional[date] = None) -
         "total_hours": sheet["total_hours"],
         "hourly_rate": rate,
         "gross_pay": gross,
+        "scheduled_per_period_salary": scheduled_salary,
+        "monthly_pay": salary.get("monthly_pay") if salary.get("success") else None,
         "payroll_rows": sheet.get("payroll_rows", []),
         "timecard_rows": sheet.get("timecard_rows", []),
     }
@@ -845,6 +878,7 @@ def get_dashboard_insights(officer_id: Optional[int] = None) -> Dict:
         compare_base_updated_schedule,
         get_current_cycle_window,
         get_day_off_requests,
+        get_labor_compliance_report,
         get_open_shifts,
         get_pending_day_off_requests,
         get_pending_manual_review_count,
@@ -869,6 +903,7 @@ def get_dashboard_insights(officer_id: Optional[int] = None) -> Dict:
         conflicts = get_schedule_conflicts(start, end, officer_id=officer_id)
         overtime = get_overtime_alerts(officer_id=officer_id)
         hours_watch = get_hours_watch(officer_id=officer_id)
+        labor_compliance = get_labor_compliance_report(officer_id=officer_id)
         manual_review = len(
             [
                 r
@@ -890,6 +925,8 @@ def get_dashboard_insights(officer_id: Optional[int] = None) -> Dict:
             "hours_watch_count": hours_watch.get("warning_count", 0),
             "hours_watch_critical": hours_watch.get("critical_count", 0),
             "hours_watch_top": hours_watch.get("warnings", [{}])[0] if hours_watch.get("warnings") else None,
+            "labor_compliance_count": labor_compliance.get("issue_count", 0),
+            "labor_compliance_top": labor_compliance.get("issues", [{}])[0] if labor_compliance.get("issues") else None,
             "schedule_conflicts": conflicts.get("conflict_count", 0),
             "schedule_diff_count": schedule_diff_count,
             "pending_requests": len(pending),
@@ -907,6 +944,7 @@ def get_dashboard_insights(officer_id: Optional[int] = None) -> Dict:
     gap_board = get_coverage_gap_board()
     overtime = get_overtime_alerts()
     hours_watch = get_hours_watch()
+    labor_compliance = get_labor_compliance_report()
     conflicts = get_schedule_conflicts(start, end)
     labor = get_labor_cost_forecast(1)
     budget = get_labor_budget_status()
@@ -923,6 +961,11 @@ def get_dashboard_insights(officer_id: Optional[int] = None) -> Dict:
         "hours_watch_count": hours_watch.get("warning_count", 0),
         "hours_watch_critical": hours_watch.get("critical_count", 0),
         "hours_watch_top": hours_watch.get("warnings", [{}])[0] if hours_watch.get("warnings") else None,
+        "labor_compliance_count": labor_compliance.get("issue_count", 0),
+        "labor_compliance_critical": sum(
+            1 for i in labor_compliance.get("issues", []) if i.get("severity") == "critical"
+        ),
+        "labor_compliance_top": labor_compliance.get("issues", [{}])[0] if labor_compliance.get("issues") else None,
         "schedule_conflicts": conflicts.get("conflict_count", 0),
         "schedule_diff_count": schedule_diff_count,
         "pending_requests": len(pending_all),

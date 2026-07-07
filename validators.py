@@ -21,14 +21,18 @@ from config import (
     POSITION_PAY_BASIS_LABELS,
     POSITION_PAY_BASIS_OPTIONS,
     REQUEST_STATUS,
-    ROTATION_BASE_DATE,
-    SHIFT_TIMES,
 )
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^[\d\s\-\(\)\+\.A-Za-z]+$")
 
-NIGHT_SHIFT_STARTS = {SHIFT_TIMES[3][0], SHIFT_TIMES[4][0]}  # 15:00, 19:00
+
+def _night_shift_starts() -> set:
+    from logic.staffing_config import get_active_night_shift_starts
+
+    return get_active_night_shift_starts()
+
+
 REQUESTABLE_STATUSES = (
     REQUEST_STATUS["pending"],
     REQUEST_STATUS["pending_manual"],
@@ -146,7 +150,7 @@ def is_officer_active(officer: dict) -> bool:
 
 
 def is_night_shift(shift_start: str) -> bool:
-    return shift_start in NIGHT_SHIFT_STARTS
+    return shift_start in _night_shift_starts()
 
 
 def applies_night_minimum(target_date: date, shift_start: str, is_high_risk_night) -> bool:
@@ -155,9 +159,12 @@ def applies_night_minimum(target_date: date, shift_start: str, is_high_risk_nigh
 
 
 def validate_cycle_date(target_date: date) -> ValidationResult:
-    if target_date < ROTATION_BASE_DATE:
+    from logic.rotation_config import get_active_rotation_base_date
+
+    base_date = get_active_rotation_base_date()
+    if target_date < base_date:
         return ValidationResult.fail(
-            f"Date {format_date(target_date)} is before rotation base {format_date(ROTATION_BASE_DATE)}"
+            f"Date {format_date(target_date)} is before rotation base {format_date(base_date)}"
         )
     return ValidationResult.pass_()
 
@@ -286,6 +293,30 @@ def validate_minimum_rest_gap(
         prefix = f"{context}: " if context else ""
         return ValidationResult.fail(f"{prefix}{gap_hours:.1f}h between shifts (minimum {min_hours:.0f}h required)")
     return ValidationResult.pass_()
+
+
+def validate_comp_time_cap(current_hours: float, accrual_delta: float, max_hours: float = None) -> ValidationResult:
+    """FLSA public-sector compensatory time accrual cap (default 480h)."""
+    from config import FLSA_COMP_TIME_MAX_HOURS
+
+    cap = max_hours if max_hours is not None else FLSA_COMP_TIME_MAX_HOURS
+    if accrual_delta <= 0:
+        return ValidationResult.pass_()
+    projected = current_hours + accrual_delta
+    if projected > cap:
+        return ValidationResult.fail(
+            f"Comp time cap exceeded: {current_hours:.1f}h + {accrual_delta:.1f}h "
+            f"exceeds FLSA maximum {cap:.0f}h — use Overtime Earned (cash) instead"
+        )
+    return ValidationResult.pass_()
+
+
+def validate_consecutive_work_days(streak: int, max_days: int, context: str = "") -> ValidationResult:
+    """Department fatigue rule — max consecutive scheduled work days."""
+    if streak <= max_days:
+        return ValidationResult.pass_()
+    prefix = f"{context}: " if context else ""
+    return ValidationResult.fail(f"{prefix}{streak} consecutive work day(s) exceeds limit of {max_days}")
 
 
 def normalize_optional_text(value: Optional[str]) -> Optional[str]:
@@ -420,7 +451,9 @@ def validate_officer_shift(
         return ValidationResult.pass_()
     if not start or not end:
         return ValidationResult.fail("Shift requires both start and end times, or Unassigned")
-    if (start, end) not in set(SHIFT_TIMES.values()):
+    from logic.staffing_config import get_active_shift_time_values
+
+    if (start, end) not in get_active_shift_time_values():
         return ValidationResult.fail("Invalid shift time combination")
     return ValidationResult.pass_()
 
@@ -440,6 +473,11 @@ def normalize_officer_job_title(job_title: Optional[str]) -> Optional[str]:
     mapped = OFFICER_TITLE_ALIASES.get(text.lower())
     if mapped:
         return mapped
+    from logic.roster_titles import get_officer_title_options
+
+    for option in get_officer_title_options():
+        if option.lower() == text.lower():
+            return option
     return text
 
 
@@ -447,15 +485,38 @@ def validate_officer_job_title(job_title: Optional[str]) -> ValidationResult:
     text = normalize_optional_text(job_title)
     if not text:
         return ValidationResult.pass_()
+    from logic.roster_titles import is_assignable_officer_title
+
     normalized = normalize_officer_job_title(text)
-    if normalized not in OFFICER_TITLE_OPTIONS:
-        allowed = ", ".join(OFFICER_TITLE_OPTIONS)
-        return ValidationResult.fail(f"Title must be one of: {allowed}")
+    if not is_assignable_officer_title(normalized):
+        return ValidationResult.fail("Title must be a standard rank or a supervisor-added custom title")
     return ValidationResult.pass_()
 
 
 def format_officer_title_display(job_title: Optional[str]) -> str:
     return normalize_officer_job_title(job_title) or ""
+
+
+def default_pay_basis_for_title(title: Optional[str]) -> str:
+    from config import YEARLY_SALARY_TITLES
+
+    if title in YEARLY_SALARY_TITLES:
+        return "yearly"
+    return "monthly"
+
+
+def is_yearly_salary_title(title: Optional[str]) -> bool:
+    from config import YEARLY_SALARY_TITLES
+
+    return bool(title and title in YEARLY_SALARY_TITLES)
+
+
+def default_annual_hours_for_title(title: Optional[str]) -> float:
+    from config import DEFAULT_ANNUAL_HOURS, SALARY_ANNUAL_HOURS, YEARLY_SALARY_TITLES
+
+    if title in YEARLY_SALARY_TITLES:
+        return SALARY_ANNUAL_HOURS
+    return DEFAULT_ANNUAL_HOURS
 
 
 def normalize_position_pay_basis(value: Optional[str]) -> str:
@@ -466,6 +527,30 @@ def normalize_position_pay_basis(value: Optional[str]) -> str:
     if text in label_map:
         return label_map[text]
     return "hourly"
+
+
+def position_amount_to_monthly(
+    amount: float,
+    pay_basis: str,
+    annual_hours: float = DEFAULT_ANNUAL_HOURS,
+) -> float:
+    basis = normalize_position_pay_basis(pay_basis)
+    if amount <= 0:
+        return 0.0
+    if basis == "monthly":
+        return round(amount, 2)
+    if basis == "yearly":
+        return round(amount / 12, 2)
+    return round((amount * annual_hours) / 12, 2)
+
+
+def monthly_pay_to_hourly(
+    monthly: float,
+    annual_hours: float = DEFAULT_ANNUAL_HOURS,
+) -> float:
+    if monthly <= 0:
+        return 0.0
+    return round((monthly * 12) / annual_hours, 4)
 
 
 def position_amount_to_hourly(
@@ -479,7 +564,7 @@ def position_amount_to_hourly(
     if basis == "hourly":
         return round(amount, 4)
     if basis == "monthly":
-        return round((amount * 12) / annual_hours, 4)
+        return monthly_pay_to_hourly(amount, annual_hours)
     return round(amount / annual_hours, 4)
 
 
@@ -488,10 +573,14 @@ def format_position_pay_summary(config: Optional[dict]) -> str:
         return "Not set"
     amount = float(config.get("amount") or 0)
     basis = normalize_position_pay_basis(config.get("pay_basis"))
+    annual_hours = float(config.get("annual_hours") or default_annual_hours_for_title(config.get("title")))
     suffix = {"hourly": "/hr", "monthly": "/mo", "yearly": "/yr"}[basis]
     salary_note = " · Salary" if config.get("is_salary") else ""
-    hourly = position_amount_to_hourly(amount, basis)
-    return f"${amount:,.2f}{suffix}{salary_note}  (${hourly:.2f}/hr equiv.)"
+    monthly = float(config.get("monthly_equivalent") or position_amount_to_monthly(amount, basis, annual_hours))
+    hourly = float(config.get("hourly_equivalent") or position_amount_to_hourly(amount, basis, annual_hours))
+    per_period = config.get("per_pay_period_amount")
+    period_note = f"  (${per_period:,.2f}/pay period)" if per_period else ""
+    return f"${amount:,.2f}{suffix}{salary_note}  (${monthly:,.2f}/mo → ${hourly:.2f}/hr){period_note}"
 
 
 def validate_position_pay_entry(
@@ -499,8 +588,11 @@ def validate_position_pay_entry(
     amount: float,
     pay_basis: str,
     is_salary: bool = False,
+    annual_hours: Optional[float] = None,
 ) -> ValidationResult:
-    if title not in OFFICER_TITLE_OPTIONS:
+    from logic.roster_titles import is_assignable_officer_title
+
+    if not is_assignable_officer_title(title):
         return ValidationResult.fail(f"Unknown position title: {title}")
     if amount < 0:
         return ValidationResult.fail(f"{title}: amount cannot be negative")
@@ -510,6 +602,10 @@ def validate_position_pay_entry(
     if basis not in POSITION_PAY_BASIS_OPTIONS:
         allowed = ", ".join(POSITION_PAY_BASIS_LABELS.values())
         return ValidationResult.fail(f"{title}: pay basis must be {allowed}")
+    hours = float(annual_hours if annual_hours is not None else default_annual_hours_for_title(title))
+    hours_check = validate_annual_hours_target(hours)
+    if not hours_check.ok:
+        return ValidationResult.fail(f"{title}: {hours_check.message}")
     return ValidationResult.pass_()
 
 
@@ -523,6 +619,35 @@ def validate_overtime_multiplier(multiplier: float) -> ValidationResult:
     if multiplier < 1.0 or multiplier > 3.0:
         return ValidationResult.fail("Overtime multiplier should be between 1.0 and 3.0")
     return ValidationResult.pass_()
+
+
+def validate_pay_code_rate_multiplier(multiplier: float, entry_type: str) -> ValidationResult:
+    if multiplier < 0 or multiplier > 10.0:
+        return ValidationResult.fail(f"{entry_type}: rate multiplier must be between 0 and 10")
+    return ValidationResult.pass_()
+
+
+def validate_pay_code_comp_ratio(ratio: float, entry_type: str) -> ValidationResult:
+    if ratio < 0 or ratio > 5.0:
+        return ValidationResult.fail(f"{entry_type}: comp credit ratio must be between 0 and 5")
+    return ValidationResult.pass_()
+
+
+def format_pay_code_formula(entry_type: str, rule: dict) -> str:
+    if not rule.get("paid", True):
+        return "Unpaid — $0"
+    if rule.get("uses_callback_minimum"):
+        return "max(hours, callback min) × base rate"
+    multiplier = rule.get("rate_multiplier", 1.0)
+    if entry_type == "Holiday Overtime" and rule.get("premium_multiplier"):
+        premium = rule["premium_multiplier"]
+        return f"hours × base rate × {multiplier} (premium × {premium})"
+    if rule.get("counts_as_overtime"):
+        return f"hours × base rate × {multiplier}"
+    if rule.get("comp_bank_credit_ratio"):
+        ratio = rule["comp_bank_credit_ratio"]
+        return f"hours × base rate × {multiplier} · comp +{ratio}× hrs"
+    return f"hours × base rate × {multiplier}"
 
 
 def validate_officer_profile(
@@ -665,4 +790,99 @@ def validate_setting_key(key: str) -> ValidationResult:
         return ValidationResult.fail("Setting key is required")
     if not re.match(r"^[a-z][a-z0-9_]*$", key):
         return ValidationResult.fail("Setting key must be lowercase letters, digits, underscores")
+    return ValidationResult.pass_()
+
+
+def validate_staffing_settings(
+    *,
+    shift_length_hours: float,
+    annual_hours_target: float,
+    shift_count: int,
+    target_officer_count: int,
+    shift_starts_text: str = "",
+) -> ValidationResult:
+    from logic.staffing_config import (
+        MAX_ANNUAL_HOURS,
+        MAX_SHIFT_COUNT,
+        MAX_SHIFT_LENGTH,
+        MAX_TARGET_OFFICERS,
+        MIN_ANNUAL_HOURS,
+        MIN_SHIFT_COUNT,
+        MIN_SHIFT_LENGTH,
+        MIN_TARGET_OFFICERS,
+        parse_shift_starts_text,
+    )
+
+    try:
+        length = float(shift_length_hours)
+    except (TypeError, ValueError):
+        return ValidationResult.fail("Shift length must be a number")
+    if length < MIN_SHIFT_LENGTH or length > MAX_SHIFT_LENGTH:
+        return ValidationResult.fail(f"Shift length must be {MIN_SHIFT_LENGTH}–{MAX_SHIFT_LENGTH} hours")
+
+    try:
+        annual = float(annual_hours_target)
+    except (TypeError, ValueError):
+        return ValidationResult.fail("Annual hours target must be a number")
+    if annual < MIN_ANNUAL_HOURS or annual > MAX_ANNUAL_HOURS:
+        return ValidationResult.fail(f"Annual hours target must be {MIN_ANNUAL_HOURS:.0f}–{MAX_ANNUAL_HOURS:.0f}")
+
+    try:
+        shifts = int(shift_count)
+    except (TypeError, ValueError):
+        return ValidationResult.fail("Number of shifts must be a whole number")
+    if shifts < MIN_SHIFT_COUNT or shifts > MAX_SHIFT_COUNT:
+        return ValidationResult.fail(f"Number of shifts must be {MIN_SHIFT_COUNT}–{MAX_SHIFT_COUNT}")
+
+    try:
+        officers = int(target_officer_count)
+    except (TypeError, ValueError):
+        return ValidationResult.fail("Target officer count must be a whole number")
+    if officers < MIN_TARGET_OFFICERS or officers > MAX_TARGET_OFFICERS:
+        return ValidationResult.fail(f"Target officer count must be {MIN_TARGET_OFFICERS}–{MAX_TARGET_OFFICERS}")
+
+    if shift_starts_text.strip():
+        starts = parse_shift_starts_text(shift_starts_text)
+        if not starts:
+            return ValidationResult.fail("Shift start times must be HH:MM values (comma-separated)")
+        for start in starts:
+            if not re.match(r"^\d{1,2}:\d{2}$", start):
+                return ValidationResult.fail(f"Invalid shift start time: {start}")
+
+    return ValidationResult.pass_()
+
+
+def validate_rotation_settings(
+    *,
+    cycle_length: int,
+    preset: str,
+    base_date_text: str = "",
+    squad_a_days_text: str = "",
+) -> ValidationResult:
+    from config import ROTATION_PRESETS
+    from logic.rotation_config import MAX_CYCLE_LENGTH, MIN_CYCLE_LENGTH, parse_squad_a_days_text
+
+    try:
+        days = int(cycle_length)
+    except (TypeError, ValueError):
+        return ValidationResult.fail("Rotation cycle length must be a number")
+    if days < MIN_CYCLE_LENGTH or days > MAX_CYCLE_LENGTH:
+        return ValidationResult.fail(f"Rotation cycle length must be {MIN_CYCLE_LENGTH}–{MAX_CYCLE_LENGTH} days")
+
+    preset = normalize_optional_text(preset)
+    if not preset or preset not in ROTATION_PRESETS:
+        allowed = ", ".join(sorted(ROTATION_PRESETS.keys()))
+        return ValidationResult.fail(f"Unknown rotation preset (choose: {allowed})")
+
+    if base_date_text.strip():
+        try:
+            parse_date(base_date_text.strip())
+        except ValueError:
+            return ValidationResult.fail(f"Rotation base date must use {DATE_INPUT_HINT}")
+
+    if squad_a_days_text.strip():
+        squad_days = parse_squad_a_days_text(squad_a_days_text.strip(), days)
+        if not squad_days:
+            return ValidationResult.fail(f"Squad A days must be cycle days 1–{days} (comma-separated or JSON list)")
+
     return ValidationResult.pass_()

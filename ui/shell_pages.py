@@ -262,8 +262,9 @@ class ShellPageMixin:
 
         self._build_dashboard()
         self._build_base_schedule()
-        self._build_updated_schedule()
+        self._build_live_schedule()
         self._build_timecard()
+        self._build_banked_time()
         self._build_timeline()
         self._build_requests()
         self._build_swaps()
@@ -278,6 +279,8 @@ class ShellPageMixin:
     def show_page(self, key: str) -> None:
         if key == "notifications":
             key = "dashboard"
+        if key == "updated_schedule":
+            key = "live_schedule"
         key = resolve_nav_target(key)
         if key not in self.pages:
             return
@@ -374,8 +377,9 @@ class ShellPageMixin:
         refreshers = {
             "dashboard": self._refresh_dashboard,
             "base_schedule": lambda: self.refresh_monthly("base"),
-            "updated_schedule": lambda: self.refresh_monthly("updated"),
+            "live_schedule": lambda: self.refresh_monthly("updated"),
             "timecard": self.refresh_timecard,
+            "banked_time": self.refresh_banked_time,
             "timeline": self.refresh_gantt,
             "requests": self.refresh_requests,
             "swaps": self.refresh_swaps,
