@@ -20,6 +20,8 @@ Prefer free terminal gates before LLM verify loops.
 |---------|------|-----|
 | `python dev.py cheap-check` | ~5s | After every edit |
 | `python dev.py usage-brief <slice>` | instant | Before reading files |
+| `python dev.py token-improve` | instant | Find new savings (mandatory if prompts/index change) |
+| `python dev.py token-minimize` | ~5s | Scan index + audit artifacts |
 | `python dev.py fix-hint` | ~5s | After any red gate |
 | `pre-commit run` | ~15s | Before commit |
 | GitHub CI on push | remote | Replaces Agent-as-CI |

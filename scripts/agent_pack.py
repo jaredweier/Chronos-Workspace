@@ -75,6 +75,10 @@ def build_agent_pack(
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "stable: docs/AGENT_STABLE.md",
         "",
+        "## Minimize (mandatory)",
+        "1. `usage-brief <slice>` 2. `outline`/`symbol` 3. edit 4. `cheap-check`",
+        "Prompts/index: `token-improve` → `token-audit --strict`",
+        "",
     ]
 
     if task.strip():

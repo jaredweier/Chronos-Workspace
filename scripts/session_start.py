@@ -76,11 +76,15 @@ def run_session_start() -> int:
     print("Automatic agent context: logs/agent_pack/latest.md (see logs/last_agent_gate.json)")
     print("  Skip: set SCHEDULER_SKIP_STARTUP_GATES=1")
 
+    print("\nMinimize (mandatory):")
+    print("  python dev.py usage-brief <slice>      # before reads")
+    print("  python dev.py outline <file>           # before full read")
+    print("  python dev.py cheap-check              # after edits")
+    print("  python dev.py token-improve            # find new savings")
     print("\nAgent routing (auto-context OFF):")
     print('  python dev.py route-task "your task"')
     print("  python dev.py agent-pack --slice <id>  # minimal pasteable context")
-    print("  python dev.py usage-brief <id>         # scoped file list")
-    print("  python dev.py token-audit              # verify minimization setup")
+    print("  python dev.py token-minimize           # scan + audit index")
     print("  docs/AGENT_ROUTING.md · docs/ZERO_AGENT_USAGE.md")
 
     print("\nQuick commands:")

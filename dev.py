@@ -150,6 +150,12 @@ def cmd_token_minimize(args):
     return max(code, audit)
 
 
+def cmd_token_improve(args):
+    from scripts.token_improve import run_token_improve
+
+    return run_token_improve(apply_fix=getattr(args, "apply", False), quiet=getattr(args, "quiet", False))
+
+
 def cmd_agent_pack(args):
     from scripts.agent_pack import run_agent_pack
 
@@ -523,6 +529,12 @@ def main():
     token_min.add_argument("--min-kb", type=int, default=50, help="Scan threshold KB (default 50)")
     token_min.add_argument("--no-fix", action="store_true", help="Scan only; do not update ignore files")
     token_min.add_argument("--strict", action="store_true", help="Fail audit on any gap")
+    token_improve = sub.add_parser(
+        "token-improve",
+        help="Suggest new token savings; --apply runs token-scan --fix",
+    )
+    token_improve.add_argument("--apply", action="store_true", help="Auto-fix safe index gaps")
+    token_improve.add_argument("--quiet", action="store_true", help="Only write logs/token_improve/latest.md")
     agent_pack = sub.add_parser(
         "agent-pack",
         help="Minimal pasteable context (route + slice + token estimates)",
@@ -731,6 +743,7 @@ def main():
         "token-audit": cmd_token_audit,
         "token-scan": cmd_token_scan,
         "token-minimize": cmd_token_minimize,
+        "token-improve": cmd_token_improve,
         "agent-pack": cmd_agent_pack,
         "outline": cmd_outline,
         "symbol": cmd_symbol,

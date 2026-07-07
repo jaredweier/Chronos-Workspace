@@ -17,6 +17,37 @@ Stop gathering when confident to answer. No extra reads/tools unless info is con
 ## Before full file read
 `python dev.py outline <file>` · `python dev.py symbol <name> [--slice id]`
 
+## Mandatory minimization tools
+Terminal only — use every session, no LLM:
+
+| When | Command |
+|------|---------|
+| Session start | `python dev.py session-start` |
+| Before reads | `python dev.py usage-brief <slice>` |
+| Before full file | `python dev.py outline <file>` or `symbol <name>` |
+| Route once | `python dev.py route-task "<task>"` |
+| After each edit | `python dev.py cheap-check` |
+| Gate fail | `python dev.py fix-hint` |
+| Slice done | `python dev.py verify-slice <id>` |
+| Handoff | `python dev.py preflight` (not full `check` every line) |
+| Long thread | `python dev.py context-window status` — summarize @ 6000t |
+| Index/prompts | `python dev.py token-minimize` |
+
+**Never:** whole-repo reads · subagents for `cheap-check`/`preflight`/`audit` · `ui-exhaustive` for typos · default PNG attachments · read 50KB+ `.py` without `outline` first (hook: `beforeReadFile`).
+
+## Continuous minimization
+Agents **find and ship** new savings — not only follow existing rules.
+
+**When touching** `AGENTS.md`, `docs/AGENT_STABLE.md`, `.cursorignore`, hooks, or `dev.py` meta:
+1. `python dev.py token-improve` — read `logs/token_improve/latest.md`
+2. Apply safe fixes (`token-scan --fix`, lean prompts, new ignore patterns, new free `dev.py` subcommand)
+3. `python dev.py token-audit --strict`
+4. Note behavior change in `docs/HANDOFF.md` if user-facing
+
+**token-improve detects:** large indexable files · fat `agent_pack` · verbose always-on rules · missing ignore patterns.
+
+**Ship tooling** in `scripts/` + wire `dev.py` when the same waste pattern appears twice.
+
 ## Routing tiers → Cursor
 | tier | mode |
 |------|------|

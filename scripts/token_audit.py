@@ -187,6 +187,22 @@ def run_token_audit(*, strict: bool = False) -> int:
             f"{agents_lines} lines — refs only; detail in docs/AGENT_STABLE.md",
         )
     )
+    checks.append(
+        Check(
+            "AGENTS.md mandates minimization tools",
+            bool(agents_md)
+            and ("Minimize (mandatory)" in agents_md or "Sufficiency / Minimize" in agents_md)
+            and "usage-brief" in agents_md
+            and "token-improve" in agents_md,
+        )
+    )
+    stable = _read("docs/AGENT_STABLE.md")
+    checks.append(
+        Check(
+            "AGENT_STABLE has continuous minimization section",
+            "Continuous minimization" in stable and "token-improve" in stable,
+        )
+    )
     checks.extend(_opencode_minimal())
 
     for rel, label in (
@@ -211,6 +227,7 @@ def run_token_audit(*, strict: bool = False) -> int:
         ("scripts/batch_process.py", "batch process (index-aligned JSON)"),
         ("scripts/structured_output.py", "structured output schemas"),
         ("scripts/token_scan.py", "token-scan script"),
+        ("scripts/token_improve.py", "token-improve script"),
         ("scripts/read_guard.py", "read guard for Cursor hooks"),
         (".cursor/hooks.json", "Cursor hooks config"),
         (".cursorindexingignore", "Cursor index exclusions"),

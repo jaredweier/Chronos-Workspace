@@ -6,8 +6,8 @@ Auto-context OFF. Load on demand: one `.grok/skills/*/SKILL.md` · `@docs/AGENTS
 
 State: `logs/last_agent_gate.json` · `logs/last_gate.json`
 
-## Sufficiency
-Stop reads/tools when confident. `python dev.py outline <file>` / `symbol <name>` before full reads.
+## Sufficiency / Minimize (mandatory)
+Stop when confident · `outline`/`symbol` first · `usage-brief <slice>` before reads · `cheap-check` after edits · `token-improve` if prompts/index change
 
 ## Verify
 `cheap-check` → `preflight` → `verify-slice <id>` → `check`. Route: `route-task` (advisory).
