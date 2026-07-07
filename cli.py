@@ -283,7 +283,6 @@ def list_pending_swaps():
 
 
 def list_swaps(args):
-    status = None
     if args.status == "pending":
         swaps = get_pending_shift_swap_requests(date_from=args.from_date, date_to=args.to_date)
     elif args.status in (None, "all"):

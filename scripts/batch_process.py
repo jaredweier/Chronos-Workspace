@@ -233,7 +233,9 @@ def process_batch(
     handler = HANDLERS[task]
     if task == "summarization":
         max_chars = int(opts.get("max_chars", 240))
-        handler = lambda item, idx: _summarize_item(item, idx, max_chars=max_chars)
+
+        def handler(item, idx):
+            return _summarize_item(item, idx, max_chars=max_chars)
 
     results: List[Optional[dict]] = [None] * len(items)
 

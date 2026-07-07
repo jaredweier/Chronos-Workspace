@@ -143,7 +143,7 @@ def run_ui_visual_diff(
             base_path,
             cur_path,
             os.path.join(diff_out, name),
-            save_diff=verbose or not ok,
+            save_diff=True,
         )
         if ok:
             passed += 1

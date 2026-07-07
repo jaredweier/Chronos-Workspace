@@ -34,7 +34,9 @@ ignore = ["E402"]
 "tests/**" = ["F841"]
 "scripts/**" = ["F401", "F841"]
 "dev.py" = ["F401"]
-"cli.py" = ["F401"]
+"cli.py" = ["F401", "F841"]
+"logic/__init__.py" = ["F403"]
+"logic/_core.py" = ["F403"]
 
 [tool.ruff.format]
 quote-style = "double"

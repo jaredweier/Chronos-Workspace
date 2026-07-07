@@ -4,13 +4,37 @@ import customtkinter as ctk
 
 from config import (
     DODGEVILLE_ACCENT,
+    DODGEVILLE_BLUE,
     DODGEVILLE_DANGER,
     DODGEVILLE_GOLD,
+    DODGEVILLE_RED,
     DODGEVILLE_SUCCESS,
     DODGEVILLE_WARNING,
     UI_ACCENT_GLOW,
+    UI_BG,
+    UI_BORDER,
+    UI_SIDEBAR,
+    UI_SURFACE,
+    UI_SURFACE_LIGHT,
     UI_TEXT_MUTED,
 )
+
+__all__ = [
+    "DODGEVILLE_ACCENT",
+    "DODGEVILLE_BLUE",
+    "DODGEVILLE_DANGER",
+    "DODGEVILLE_GOLD",
+    "DODGEVILLE_RED",
+    "DODGEVILLE_SUCCESS",
+    "DODGEVILLE_WARNING",
+    "UI_ACCENT_GLOW",
+    "UI_BG",
+    "UI_BORDER",
+    "UI_SIDEBAR",
+    "UI_SURFACE",
+    "UI_SURFACE_LIGHT",
+    "UI_TEXT_MUTED",
+]
 
 FONT_SPECS = {
     "title": {"size": 34, "weight": "bold"},

@@ -23,6 +23,7 @@ from logic import (
     export_pay_stub_pdf,
     export_payroll_csv,
     export_payroll_pdf,
+    export_timecard_csv,
     get_adjacent_pay_period,
     get_department_pay_summary,
     get_holidays_in_range,
