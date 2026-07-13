@@ -29,7 +29,8 @@ def run_usage_brief(slice_id: str = "", verbose: bool = False) -> int:
     print(f"Backend: {rust_bridge.backend_name()} scheduling math")
     print("Policy: docs/AGENT_STABLE.md · Pack: logs/agent_pack/latest.md")
 
-    handoff = _head("docs/HANDOFF.md", 30 if verbose else 20)
+    # Trust table only by default (token tax); full handoff if --verbose
+    handoff = _head("docs/HANDOFF.md", 40 if verbose else 8)
     if handoff:
         print("\n--- HANDOFF excerpt ---")
         for line in handoff:

@@ -142,31 +142,7 @@ AGENT_CATALOG: Dict[str, Dict[str, Any]] = {
         "invoke": ".grok/skills/ui-vision-review/SKILL.md",
         "url": None,
     },
-    # --- External open-source UI / browser agents (prefer after free static) ---
-    "browser-use": {
-        "kind": "external",
-        "cost": "vision",
-        "harness": "browser_agent",
-        "when": "live Chronos in browser: click flows, multi-step UI verify",
-        "invoke": "pip install browser-use · agent against http://localhost:8080",
-        "url": "https://github.com/browser-use/browser-use",
-    },
-    "browser-use-webui": {
-        "kind": "external",
-        "cost": "vision",
-        "harness": "browser_agent",
-        "when": "Gradio UI over browser-use for manual agent runs",
-        "invoke": "https://github.com/browser-use/web-ui",
-        "url": "https://github.com/browser-use/web-ui",
-    },
-    "skyvern": {
-        "kind": "external",
-        "cost": "vision",
-        "harness": "browser_agent",
-        "when": "complex multi-page browser workflows / self-heal selectors",
-        "invoke": "Skyvern planner-actor-validator (self-host or cloud)",
-        "url": "https://github.com/Skyvern-AI/skyvern",
-    },
+    # External browser: Playwright only in-catalog. Others: docs/UI_AGENTS_CATALOG.md (user-escalation).
     "playwright": {
         "kind": "external",
         "cost": "cheap",
@@ -174,54 +150,6 @@ AGENT_CATALOG: Dict[str, Dict[str, Any]] = {
         "when": "repeatable scripted E2E (prefer over vision for known paths)",
         "invoke": "Playwright Python/JS tests against Chronos URLs",
         "url": "https://github.com/microsoft/playwright",
-    },
-    "stagehand": {
-        "kind": "external",
-        "cost": "balanced",
-        "harness": "scripted_browser",
-        "when": "AI-assisted browser scripts with lower vision cost than full agents",
-        "invoke": "Browserbase Stagehand (or OSS forks)",
-        "url": "https://github.com/browserbase/stagehand",
-    },
-    "ui-tars": {
-        "kind": "external",
-        "cost": "vision",
-        "harness": "gui_agent",
-        "when": "desktop/native GUI perception (pywebview native Chronos)",
-        "invoke": "ByteDance UI-TARS research agent",
-        "url": "https://github.com/bytedance/UI-TARS",
-    },
-    "omniparser": {
-        "kind": "external",
-        "cost": "vision",
-        "harness": "gui_parse",
-        "when": "parse GUI screenshots into elements before vision LLM",
-        "invoke": "Microsoft OmniParser + cheap model on structured elements",
-        "url": "https://microsoft.github.io/OmniParser/",
-    },
-    "cline": {
-        "kind": "external",
-        "cost": "balanced",
-        "harness": "vscode_agent",
-        "when": "VS Code autonomous edits with permission gates",
-        "invoke": "Cline VS Code extension",
-        "url": "https://github.com/cline/cline",
-    },
-    "aider": {
-        "kind": "external",
-        "cost": "cheap",
-        "harness": "terminal_agent",
-        "when": "small terminal-driven multi-file edits (map+edit, cheap models)",
-        "invoke": "aider --model <cheap>",
-        "url": "https://github.com/Aider-AI/aider",
-    },
-    "continue-dev": {
-        "kind": "external",
-        "cost": "cheap",
-        "harness": "ide_chat",
-        "when": "inline IDE chat with local/cheap models",
-        "invoke": "Continue.dev extension",
-        "url": "https://github.com/continuedev/continue",
     },
 }
 
@@ -681,10 +609,12 @@ def run_agent_route(
     complexity: str = "",
     slice_id: str = "",
     as_json: bool = False,
+    verbose: bool = False,
 ) -> int:
     if not task.strip():
         print('Usage: python dev.py route-task "fix bump approval"')
         print('       python dev.py route-task --json "fix bump approval"')
+        print('       python dev.py route-task --verbose "…"')
         print('       python dev.py route-task --complexity vision "layout broken"')
         return 1
     rec = route_task(task, complexity_override=complexity, slice_override=slice_id)
@@ -693,7 +623,14 @@ def run_agent_route(
 
         print(dump_json(shape_route(rec)))
         return 0
-    print(format_recommendation(rec, task))
+    if verbose:
+        print(format_recommendation(rec, task))
+    else:
+        print(format_recommendation_compact(rec))
+        print(f"task: {task[:100]}{'…' if len(task) > 100 else ''}")
+        print(f"rationale: {rec.rationale}")
+        if rec.do_not:
+            print("guards: " + "; ".join(rec.do_not[:2]))
     return 0
 
 
@@ -702,6 +639,7 @@ if __name__ == "__main__":
     comp = ""
     slice_ov = ""
     as_json = False
+    verbose = False
     rest: List[str] = []
     i = 0
     while i < len(args):
@@ -714,7 +652,12 @@ if __name__ == "__main__":
         elif args[i] == "--json":
             as_json = True
             i += 1
+        elif args[i] == "--verbose":
+            verbose = True
+            i += 1
         else:
             rest.append(args[i])
             i += 1
-    raise SystemExit(run_agent_route(" ".join(rest), complexity=comp, slice_id=slice_ov, as_json=as_json))
+    raise SystemExit(
+        run_agent_route(" ".join(rest), complexity=comp, slice_id=slice_ov, as_json=as_json, verbose=verbose)
+    )

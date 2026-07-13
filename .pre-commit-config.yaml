@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: codespell
         files: ^(docs/.*\.md|SCHEDULING_RULES\.(md|txt)|README\.md|AGENTS\.md)$
-        exclude: ^docs/FULL_PROJECT_CODE\.txt$
+        exclude: ^(docs/FULL_PROJECT_CODE\.txt|docs/archived_skills/.*)$
 
   - repo: local
     hooks:

@@ -1,12 +1,9 @@
 ---
 name: scheduling-logic
-description: >
-  Scheduling & math for Chronos — rotation, bumps, optimizers, rest/night,
-  Rust bridge, CP-SAT. MAXIMUM capability: any public OR/math source or technique.
-  Tool: python dev.py math-domain.
+description: Scheduling math — rotation, bumps, optimizers, rest/night, Rust/CP-SAT. Prefer dev.py math-domain.
 ---
 
-# Scheduling logic & mathematics — maximum capability
+# Scheduling logic & mathematics â€” focused
 
 ## Goal
 
@@ -18,10 +15,10 @@ Best scheduling math quality and performance. No solver allowlists.
 python dev.py math-domain explore|brainstorm|research-queries|engines|run-checks|learn
 python dev.py math-scenarios --with-cpsat
 python dev.py fuzz-scheduling
-python dev.py scenarios · audit
+python dev.py scenarios Â· audit
 ```
 
-Use arXiv, OR-Tools, MiniZinc, HiGHS, papers, GitHub solvers, textbooks — freely.
+Prefer in-repo solvers + tests. External math research only if user asks.
 
 ## In-repo map
 
@@ -35,10 +32,10 @@ Use arXiv, OR-Tools, MiniZinc, HiGHS, papers, GitHub solvers, textbooks — free
 
 ## Freedom
 
-- New optimizers, scoring, Rust/Python splits, optional engines — encouraged if better
+- New optimizers, scoring, Rust/Python splits, optional engines â€” encouraged if better
 - Policy knobs (night min, rest, junior-first) should stay **configurable** and tested
-- Deposit: `math-domain learn --url … --as-idea`
+- Deposit: `math-domain learn --url â€¦ --as-idea`
 
 ## Related
 
-`docs/knowledge/math_logic_sources.json` · `first-responder-wfm` · `payroll-timecard`
+`docs/knowledge/math_logic_sources.json` Â· `first-responder-wfm` Â· `payroll-timecard`

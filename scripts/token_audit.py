@@ -213,8 +213,8 @@ def run_token_audit(*, strict: bool = False) -> int:
         (".grok/rules/auto-minimize.md", "Grok always-on auto-minimize rule"),
         (".grok/rules/token-minimization.md", "Grok token-minimization rules"),
         (".grok/rules/agent-routing.md", "Grok agent-routing rules"),
-        (".grok/skills/cost-efficient-workflow/SKILL.md", "cost-efficient-workflow skill"),
-        (".grok/skills/agent-routing/SKILL.md", "agent-routing skill"),
+        (".grok/skills/qa-verify/SKILL.md", "qa-verify skill"),
+        (".grok/skills/ui-development/SKILL.md", "ui-development skill"),
         (".opencode/agents/qa-free.md", "OpenCode qa-free subagent"),
         ("scripts/usage_brief.py", "usage-brief script"),
         ("scripts/agent_pack.py", "agent-pack script"),
@@ -327,6 +327,92 @@ def run_token_audit(*, strict: bool = False) -> int:
             "BLOCKED_READS" not in pack_src,
         )
     )
+
+    # --- Auto-abide policy contracts (Phase 0/A) ---
+    archive_under_skills = os.path.isdir(os.path.join(ROOT, ".grok", "skills", "_archive"))
+    checks.append(
+        Check(
+            "no .grok/skills/_archive (moved out of skill discovery)",
+            not archive_under_skills,
+            "move to docs/archived_skills/ so Grok does not inject archive skill cards",
+        )
+    )
+    claude_archive = os.path.isdir(os.path.join(ROOT, ".claude", "skills", "_archive"))
+    checks.append(
+        Check(
+            "no .claude/skills/_archive under discovery",
+            not claude_archive,
+            "move to docs/archived_skills/claude/",
+        )
+    )
+    demoted = (
+        "agent-routing",
+        "cost-efficient-workflow",
+        "token-discipline",
+        "frontend-design",
+        "stop-slop",
+        "refactor",
+        "check-work",
+    )
+    for name in demoted:
+        still = os.path.isdir(os.path.join(ROOT, ".grok", "skills", name))
+        checks.append(
+            Check(
+                f"demoted skill not discoverable: {name}",
+                not still,
+                f"move .grok/skills/{name} → docs/archived_skills/optional/",
+            )
+        )
+    checks.append(
+        Check(
+            "AGENTS.md bans archived_skills open",
+            "archived_skills" in agents_md.lower() or "archive" in agents_md.lower(),
+            "add hard ban: never open docs/archived_skills unless user names skill",
+        )
+    )
+    kit_path = os.path.join(ROOT, "logs", "agent_kit", "latest.md")
+    if os.path.isfile(kit_path):
+        kit_chars = os.path.getsize(kit_path)
+        checks.append(
+            Check(
+                "agent_kit latest.md lean (<=4500 chars)",
+                kit_chars <= 4500,
+                f"{kit_chars} chars — trim usage-brief HANDOFF excerpt / kit template",
+            )
+        )
+    try:
+        import sys as _sys
+
+        if ROOT not in _sys.path:
+            _sys.path.insert(0, ROOT)
+        from scripts.agent_route import route_task
+
+        rec_typo = route_task("fix typo on button")
+        checks.append(
+            Check(
+                "route free/cheap typo has empty OSS",
+                rec_typo.cost_tier in ("free", "cheap") and not rec_typo.oss_searches and not rec_typo.oss_actions,
+                f"cost={rec_typo.cost_tier} oss={rec_typo.oss_searches}",
+            )
+        )
+        checks.append(
+            Check(
+                "route catalog has no skyvern default",
+                "skyvern" not in _read("scripts/agent_route.py").lower()
+                or '"skyvern"' not in _read("scripts/agent_route.py"),
+                "remove skyvern from AGENT_CATALOG",
+            )
+        )
+        cat = _read("scripts/agent_route.py")
+        checks.append(
+            Check(
+                "AGENT_CATALOG external only playwright (no skyvern/browser-use)",
+                '"skyvern"' not in cat and '"browser-use"' not in cat,
+                "drop external OSS agents from catalog; keep docs/UI_AGENTS_CATALOG.md",
+            )
+        )
+    except Exception as exc:
+        checks.append(Check("route_task policy fixtures", False, str(exc)))
 
     print("Dodgeville PD — token minimization audit")
     print("=" * 60)

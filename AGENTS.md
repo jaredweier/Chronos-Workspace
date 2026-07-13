@@ -14,6 +14,7 @@ Short bullets. No preamble. Prose only if user asks explain/docs.
 `usage-brief` → `outline`/`symbol` → edit **touch_together** → `verify --tier fast`
 Ship: `verify --tier check` + `logs/last_verify.json` → `honest_gate: true`
 
-## Edit
-Rules in `validators` + `logic/*` only. No SQL in `gui/`. Dual-rate Logic vs Chronos.
-Optional (user ask): graphify · vision · domain research · `_archive` skills
+## Hard bans
+No explore/plan subagents. No subagents for gates. Max 1 skill body/task.
+Never open `docs/archived_skills/` unless user names that skill.
+Optional only if user asks: graphify · vision · OSS research.

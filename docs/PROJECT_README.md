@@ -2,8 +2,9 @@
 
 This document summarizes **what the app does today**, **recent changes**, **how to run and test it**, and **where development is headed**. It mirrors the agent handoff in [`HANDOFF.md`](HANDOFF.md) in a form meant for humans and new contributors.
 
-**Last updated:** 2026-07-12
-**Tests:** `python -m unittest discover -s tests -p "test_*.py"` — **381 OK** (re-prove after edits). Ship: `python dev.py verify --tier check` + `honest_gate: true`.
+**Last updated:** 2026-07-13
+**Tests:** `python -m unittest discover -s tests -p "test_*.py"` — **385 OK** (2026-07-13; re-prove after edits). Ship: `python dev.py verify --tier check` + `honest_gate: true`.
+**Agent tokens:** `AGENTS.md` caveman + `docs/archived_skills/` (not discoverable). `python dev.py token-audit --strict`.
 
 ---
 
@@ -154,27 +155,25 @@ If a specific tab still feels slow, note which one — Gantt and some dashboard 
 
 ```
 MyProject/
-├── main.py              # Launches GUI
-├── logic.py             # Business rules
-├── database.py          # SQLite schema and connection
-├── validators.py        # Validation (single source of truth)
-├── cli.py               # Admin CLI
-├── dev.py               # Tests, audit, doctor, smoke
-├── ui/
-│   ├── app.py           # Main shell (tabs, navigation)
-│   ├── schedule_pages.py
-│   ├── officers_pages.py
-│   ├── requests_pages.py
-│   ├── payroll_pages.py
-│   └── widgets.py       # Shared UI components
+├── main.py                 # Launches Chronos (gui/)
+├── logic/                  # Domain package (scheduling, payroll, requests, …)
+├── validators.py           # Facade + validators_* modules
+├── database.py             # SQLite schema and connection
+├── cli.py                  # Admin CLI (calls logic.*)
+├── dev.py                  # Tests, audit, doctor, smoke, verify
+├── gui/                    # Primary UI — Chronos NiceGUI
+│   ├── app.py, shell.py
+│   └── pages/              # leave, roster, schedules, finance/, …
+├── ui/pages/               # Legacy CustomTkinter (secondary)
 ├── tests/
 ├── docs/
-│   ├── PROJECT_README.md   # This file
-│   └── HANDOFF.md          # Agent session memory
+│   ├── PROJECT_README.md
+│   ├── HANDOFF.md
+│   └── archived_skills/    # Not agent-discoverable
 └── SCHEDULING_RULES.md
 ```
 
-**Architecture rule:** UI calls `logic.*` only — no SQL or scheduling rules in UI files.
+**Architecture rule:** UI calls `logic.*` only — no SQL or scheduling rules in `gui/`.
 
 ---
 

@@ -3,9 +3,20 @@
 **Purpose:** Restore honest agent status after repeated overclaims.
 **Audience:** Next agent + human.
 **Rule:** Do not mark a row done without the **Success proof** command/output.
-**Created:** 2026-07-09 (from independent project + agent-performance audit)
+**Created:** 2026-07-09 · **Updated:** 2026-07-13
 
 Primary UI is **`gui/`** (NiceGUI). Legacy **`ui/`** is reference/tests unless a task explicitly says otherwise.
+
+### Definition of trust restored (maps — not full product)
+
+| Proof | Result (2026-07-13) |
+|-------|---------------------|
+| `python dev.py slice-check` | clean (all bindings resolve) |
+| Full unittest `discover -s tests -p "test_*.py"` | **385 OK** (`SCHEDULER_SKIP_AGENT_GATES=1`) |
+| `python dev.py token-audit --strict` | **89/89** |
+| `verify --tier check` | **PASS** · `honest_gate: true` (2026-07-13) |
+| Product Chronos dual-rate | still **partial** (logic smoke ≠ browser e2e) |
+| Ship claim | only after `verify --tier check` + `honest_gate: true` |
 
 ---
 

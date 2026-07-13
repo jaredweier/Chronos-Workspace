@@ -1,9 +1,6 @@
 ---
 name: build-deploy
-description: >
-  Dodgeville PD frozen builds and launchers — PyInstaller, dist/, eval packages,
-  Start Scheduler.bat, asset bundling. Use when user can't see updates, needs
-  .exe, or asks about build_quick.bat / build_test.bat / frozen eval.
+description: Frozen builds/launchers — PyInstaller, dist/, Start Scheduler.bat. Use when user needs .exe or can't see updates.
 ---
 
 # Build & Deploy Subagent
@@ -51,7 +48,7 @@ PyInstaller `--add-data` bundles these; `paths.resource_path()` resolves at runt
 ## Workflow
 
 1. Confirm user runs **source** not old `.exe`
-2. `python dev.py doctor` — assets and deps OK
+2. `python dev.py doctor` â€” assets and deps OK
 3. `python dev.py check` before eval build
 4. `build_quick.bat` or `build_test.bat`
 5. Copy `Start Dodgeville Scheduler.bat` into `dist\`
@@ -61,4 +58,4 @@ PyInstaller `--add-data` bundles these; `paths.resource_path()` resolves at runt
 
 - Point users to `\\PD-SERVER\...` network paths for local dev
 - Ship frozen build without bundled images
-- Change `main.py` entry — always `ui.app.run()`
+- Change `main.py` entry â€” always `ui.app.run()`

@@ -2,8 +2,6 @@
 
 Always-on: `.grok/rules/auto-minimize.md` · stable: `docs/AGENT_STABLE.md`
 
-**Mandatory tools:** `docs/AGENT_STABLE.md` § Mandatory minimization tools
+**Sufficiency · Blocked · Context window · Batch · Structured output** — see `docs/AGENT_STABLE.md` and `docs/ZERO_AGENT_USAGE.md`.
 
-**Continuous improvement:** `python dev.py token-improve` → `logs/token_improve/latest.md` → ship fixes + `dev.py` subcommands
-
-Sections: Sufficiency · Blocked · Context window · Batch · Structured output · `docs/ZERO_AGENT_USAGE.md`
+**Continuous:** `python dev.py token-improve` → `token-audit --strict`

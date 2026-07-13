@@ -1,12 +1,14 @@
 # Agent routing (Grok)
 
-`python dev.py route-task "<task>"` · auto **cost_tier** + UI agent chain
+`python dev.py route-task "<task>"` → **one primary agent + cost_tier + one skill**.
 
-Auto-context OFF · cheapest fit model · any LLM allowed
-Skill: `.grok/skills/agent-routing/SKILL.md`
-Catalog: `@docs/UI_AGENTS_CATALOG.md` · policy `@docs/AGENT_ROUTING.md`
+Auto-context OFF · cheapest fit · any LLM allowed.
+Policy: `@docs/AGENT_ROUTING.md` · external (user-only): `@docs/UI_AGENTS_CATALOG.md`
 
-**Sufficiency:** stop gathering when confident; no extra reads unless contradictory or incomplete.
-Policy hub: `docs/AGENT_STABLE.md` · pack: `logs/agent_pack/latest.md` · trust: `docs/TRUST_REPAIR_CHECKLIST.md`
+**Rules**
+- Run route-task **once** per task; obey `cost_tier`.
+- free/cheap: empty OSS; Tab/Ask/terminal only; no vision.
+- Load at most **one** skill body if route prints it.
+- Chain ≤ 3 steps. No skyvern/browser-use unless user escalates.
 
-**UI design XOR:** visual UI tasks load **frontend-design** *or* **taste-skill** (one only). Never both unless the user says so. Defaults in `AGENTS.md` § UI design skills.
+**Sufficiency:** stop gathering when confident. Hub: `docs/AGENT_STABLE.md`.

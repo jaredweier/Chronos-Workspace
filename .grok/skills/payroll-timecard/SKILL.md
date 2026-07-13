@@ -1,18 +1,15 @@
 ---
 name: payroll-timecard
-description: >
-  Dodgeville PD payroll and timecard domain — pay periods, locks, overnight
-  shifts, holiday markers, period navigation. Use for logic/payroll.py,
-  ui/payroll_pages.py, tests/test_payroll.py, tests/test_timecard_schedules.py.
+description: Payroll/timecard domain — periods, locks, overnight, holidays. logic/payroll*, gui finance pages.
 ---
 
 # Payroll & Timecard Subagent
 
 ## Scope
 
-- `logic/payroll.py` — pay periods, timecard CRUD, lock/unlock, imports
-- `ui/payroll_pages.py` — Payroll tab, Timecard tab
-- `logic/operations.py` — holidays (`get_holidays_in_range`)
+- `logic/payroll.py` â€” pay periods, timecard CRUD, lock/unlock, imports
+- `ui/payroll_pages.py` â€” Payroll tab, Timecard tab
+- `logic/operations.py` â€” holidays (`get_holidays_in_range`)
 - `tests/test_payroll.py`, `tests/test_timecard_schedules.py`
 - Slice: `payroll-timecard` in `slices/registry.py`
 
@@ -20,12 +17,12 @@ description: >
 
 - 14-day periods aligned to department calendar (`get_pay_period`)
 - `lock_pay_period` blocks edits for that period only
-- `is_future_pay_period` compares normalized period starts — pass explicit `reference=` in tests
+- `is_future_pay_period` compares normalized period starts â€” pass explicit `reference=` in tests
 - Overnight shifts: `time_in`/`time_out` span midnight; hours attach to shift **start** period
 
 ## Date-sensitive testing
 
-Use fixed reference dates — never rely on `date.today()` in assertions:
+Use fixed reference dates â€” never rely on `date.today()` in assertions:
 
 ```python
 from datetime import date
@@ -39,12 +36,12 @@ Use `tests.helpers.reference_today()` or `TEST_REFERENCE_DATE` instead of `date.
 ## OPEN research (payroll math)
 
 Any public FLSA/comp-time/payroll source is allowed (DOL fact sheets, OPM, municipal policies, vendor marketing math).
-Also: `python dev.py math-domain research-queries "FLSA 7k"` · `fr-domain flsa` · web_search freely.
+Also: `python dev.py math-domain research-queries "FLSA 7k"` Â· `fr-domain flsa` Â· web_search freely.
 Deposit: `math-domain learn` or `fr-domain learn`.
 
 ## Workflow
 
-1. Find slice: `python dev.py slice-map -v` → `payroll-timecard`
+1. Find slice: `python dev.py slice-map -v` â†’ `payroll-timecard`
 2. Fix validators if input invalid; else `logic/payroll.py` / `labor_compliance.py` / `banked_time.py`
 3. Wire UI in `gui/pages/finance.py` (primary) or legacy `ui/` only if needed
 4. `python dev.py verify-slice payroll-timecard` or targeted unittests
@@ -58,7 +55,7 @@ Deposit: `math-domain learn` or `fr-domain learn`.
 | Lock | `lock_pay_period`, `unlock_pay_period`, `is_pay_period_locked` |
 | Timecard | `save_timecard_entry`, `prefill_timecard_from_schedule` |
 | Summary | `get_pay_period_hours_summary`, `_summarize_pay_period_hours` |
-| Holidays | `get_holidays_in_range`, `ui` ★ markers on timecard |
+| Holidays | `get_holidays_in_range`, `ui` â˜… markers on timecard |
 
 ## Do not
 

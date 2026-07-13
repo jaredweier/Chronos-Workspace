@@ -1,16 +1,14 @@
 ---
 name: cli-operations
-description: >
-  Admin CLI and dev tooling for Dodgeville PD Scheduler. Use for cli.py, dev.py,
-  scripts/, exports, backups, and operational automation without duplicating logic.
+description: Admin CLI and dev tooling — cli.py, dev.py, scripts/, exports, backups. No raw SQL in CLI.
 ---
 
 # CLI & Operations Subagent
 
 ## Scope
 
-- `cli.py` — admin commands (must call `logic.*`, never raw SQL)
-- `dev.py` — developer gates
+- `cli.py` â€” admin commands (must call `logic.*`, never raw SQL)
+- `dev.py` â€” developer gates
 - `scripts/doctor.py`, `scripts/smoke_test.py`, `scripts/feature_map.py`
 - `exports.py` / export functions in `logic.py`
 
@@ -20,7 +18,7 @@ description: >
 |---------|---------|
 | `python dev.py doctor` | Python version, deps, imports, DB schema, assets |
 | `python dev.py smoke` | Fast integration: day-off, user, iCal, PDF |
-| `python dev.py feature-map` | UI ↔ logic ↔ CLI coverage table |
+| `python dev.py feature-map` | UI â†” logic â†” CLI coverage table |
 | `python dev.py check` | imports + 140 tests + audit |
 | `python dev.py audit` | Scheduling regression audit only |
 | `python dev.py reset-db` | Wipe and reseed |
@@ -54,5 +52,5 @@ def export_foo_cmd(args):
 
 ## Do not
 
-- Duplicate validation in CLI — logic already validates
-- Add SQL to cli.py — use logic CRUD functions
+- Duplicate validation in CLI â€” logic already validates
+- Add SQL to cli.py â€” use logic CRUD functions

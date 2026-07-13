@@ -5,7 +5,7 @@ Companions deepen detail; they do **not** excuse skipping rules here.
 
 | Field | Value |
 |-------|--------|
-| Date | 2026-07-09 |
+| Date | 2026-07-13 |
 | Product | **Chronos Command** (Dodgeville PD scheduler) |
 | Primary UI | `gui/` NiceGUI (`python main.py`) |
 | Legacy UI | `ui/` CustomTkinter — reference/tests, **not** primary |
@@ -69,17 +69,19 @@ TRUST: still broken | P0 in progress | repaired (only if checklist exit met)
 ### Mission
 Ship **Chronos Command**: modern NiceGUI UI, multi-user capable, business rules only in `validators` + `logic/*` + SQLite.
 
-### Status (2026-07-09 — P0/P1 trust repair executed)
+### Status (2026-07-13 — trust maps OK; product partial; token auto-abide)
 
 | Area | Honest status | Notes |
 |------|---------------|--------|
-| Domain logic (`logic/*`, validators, Rust) | **Strong** | Audit 10/10; re-run after edits |
+| Domain logic (`logic/*`, validators, Rust) | **Strong** | Re-run audit after edits |
 | CLI | **Strong** | Thin wrapper over logic |
 | Chronos `gui/` | **Partial / usable** | Shell + key flows; **not** full CTk parity |
 | Legacy `ui/` | **Secondary** | `ui/pages/*` |
+| Full unittest | **385 OK** (2026-07-13) | Re-prove after edits |
+| token-audit | **89/89** | Archive skills off discovery |
 | Vertical slices registry | **Fixed (paths + partial status)** | Primary UI `gui/pages/*` |
 | feature-map UI column | **Fixed** | File existence; bidding UI `—` |
-| Full unittest | **381 OK** (2026-07-12) | Re-prove after edits |
+| Full unittest | **385 OK** (2026-07-13) | Re-prove after edits |
 | Ship gate | Re-run `verify --tier check` | Do not trust stale `last_verify` |
 | Token path | **Lean** (2026-07-12) | Caveman + short route; no OSS tax on low/trivial |
 | Multi-user / deploy | **Partial** | NiceGUI can host; hardening open |

@@ -42,9 +42,9 @@ def run_session_start() -> int:
     print("Dodgeville PD Scheduler — session start")
     print("=" * 60)
 
-    handoff = _read_head("docs/HANDOFF.md", 25)
+    handoff = _read_head("docs/HANDOFF.md", 8)
     if handoff:
-        print("\nHandoff (docs/HANDOFF.md):")
+        print("\nHandoff (docs/HANDOFF.md, 8 lines):")
         for line in handoff:
             if line.strip():
                 print(f"  {line}")
@@ -77,7 +77,7 @@ def run_session_start() -> int:
     print("  Skip: set SCHEDULER_SKIP_STARTUP_GATES=1")
 
     # Always refresh free agent-kit so the next/this session has a pasteable pack.
-    slice_id = os.environ.get("SCHEDULER_SLICE", "").strip() or "day-off-requests"
+    slice_id = os.environ.get("SCHEDULER_SLICE", "").strip() or "general"
     task = os.environ.get("SCHEDULER_AGENT_TASK", "").strip() or "Session resume — follow agent-kit"
     print(f"\nAgent kit (auto): slice={slice_id}")
     try:

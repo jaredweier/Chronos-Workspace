@@ -61,12 +61,12 @@ Generated: {ts}
 ## Paste
 `@logs/agent_kit/latest.md` + `@logs/agent_pack/latest.md` + `@docs/AGENT_STABLE.md`
 
-## Caveman
-Short bullets. No OSS research unless user asks.
-
-## Chain
-`route-task` → `usage-brief` → `outline`/`symbol` → edit touch_together → `verify --tier fast`
-Ship: `verify --tier check` + honest_gate true
+## Rules (auto-abide)
+- Caveman bullets. No OSS/graphify/archive skills unless user asks.
+- `route-task` once → obey cost_tier. Max 1 skill body/task.
+- No explore/plan subagents. No subagents for gates.
+- Chain: usage-brief → outline/symbol → edit → `verify --tier fast`
+- Ship: `verify --tier check` + honest_gate true
 
 ## Free cmds
 | Need | Cmd |
@@ -78,12 +78,12 @@ Ship: `verify --tier check` + honest_gate true
 
 ## Route
 ```
-{_head(route or "(pass --task for route)", 12)}
+{_head(route or "(pass --task for route)", 8)}
 ```
 
 ## Brief ({sid})
 ```
-{_head(brief, 22)}
+{_head(brief, 12)}
 ```
 """
     LATEST.write_text(body, encoding="utf-8")
