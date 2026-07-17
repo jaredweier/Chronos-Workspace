@@ -4,8 +4,16 @@ A desktop application for managing 24/7 shift schedules, day-off requests, shift
 
 **Project status, recent changes, and resume guide:** see [`docs/PROJECT_README.md`](docs/PROJECT_README.md).
 **Agent session handoff:** see [`docs/HANDOFF.md`](docs/HANDOFF.md).
-**Full project dump (single file):** [`docs/FULL_PROJECT_CODE.txt`](docs/FULL_PROJECT_CODE.txt) — source, database, build/cache (~29 MB; binaries base64; `dist/` omitted). Regenerate: `python scripts/export_project_code.py`.
+**Full project dump (single file):** [`docs/FULL_PROJECT_CODE.txt`](docs/FULL_PROJECT_CODE.txt) — source, database, build/cache (~29 MB; binaries base64; `dist/` omitted). Regenerate: `python scr[...]`
 **Multi-PC deployment:** [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — shared network install for up to 8 computers; launcher in [`docs/deploy/`](docs/deploy/).
+
+## 🌐 Remote Access via Cloudflare
+
+Share your scheduler securely with officers using your Cloudflare domain:
+
+- **[Cloudflare Tunnel Setup Guide](TUNNEL_SETUP.md)** — Access your scheduler from anywhere without port forwarding
+- **Quick start (macOS/Linux):** `bash tunnel-setup.sh`
+- **Quick start (Windows):** `tunnel-setup.bat`
 
 ## Project Structure
 
