@@ -199,7 +199,7 @@ def generate_start_packs(shift_length_hours: float, *, max_packs: int = 1000, nu
     return packs[:max_packs]
 
 
-def generate_length_options(*, lo: float = 8.0, hi: float = 12.0) -> List[float]:
+def generate_length_options(*, lo: float = 8.0, hi: float = 12.5) -> List[float]:
     out: List[float] = []
     x = lo
     while x <= hi + 1e-9:
@@ -1226,6 +1226,10 @@ def optimize_staffing_scenarios(
 
     staffing = axes["staffing"]
     annual = float(annual_hours_target) if annual_hours_target is not None else float(staffing["annual_hours_target"])
+    # UI passes None when the annual-hours requirement is off; every consumer
+    # below expects a number (float() at the early-impossible gate crashed on
+    # None — found live 2026-07-17). Coalesce to the signature default once.
+    annual_hours_variance = float(annual_hours_variance) if annual_hours_variance is not None else 40.0
     night_min = int(night_minimum) if night_minimum is not None else int(config.NIGHT_MINIMUM_OFFICERS)
     windows = list(extra_windows or [])
     cov247 = max(0, int(coverage_247 or 0))
@@ -1616,6 +1620,9 @@ def optimize_staffing_scenarios(
                                     flexible_daily_starts=False,
                                     nearby_start_hops=nearby_hops,
                                     allow_offday_coverage=offday_ok,
+                                    min_rest_hours=float(min_rest_hours),
+                                    max_consecutive_work_days=int(max_consecutive_work_days),
+                                    sim_start_date=sim_start,
                                 )
                                 sim = simulate_schedule(cfg)
                                 full_sims += 1
@@ -1815,6 +1822,9 @@ def optimize_staffing_scenarios(
                                     "flexible_daily_starts": False,
                                     "nearby_start_hops": nearby_hops,
                                     "allow_offday_coverage": offday_ok,
+                                    "min_rest_hours": float(min_rest_hours),
+                                    "max_consecutive_work_days": int(max_consecutive_work_days),
+                                    "sim_start_date": sim_start,
                                 }
 
                             def _run_one_full(ph, pm):
@@ -2071,6 +2081,9 @@ def optimize_staffing_scenarios(
                                             flexible_daily_starts=False,
                                             nearby_start_hops=nearby_hops,
                                             allow_offday_coverage=offday_ok,
+                                            min_rest_hours=float(min_rest_hours),
+                                            max_consecutive_work_days=int(max_consecutive_work_days),
+                                            sim_start_date=sim_start,
                                         )
                                         sim = simulate_schedule(cfg)
                                         full_sims += 1

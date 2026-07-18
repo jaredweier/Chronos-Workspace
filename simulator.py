@@ -59,6 +59,10 @@ class SimulatorConfig:
     min_rest_hours: float = 0.0
     # Max consecutive ON days in multi-block vector (0 = off).
     max_consecutive_work_days: int = 0
+    # Calendar anchor for the sim window (Fri/Sat night detection, phase
+    # staggering). None = today. UI's "sim start date" lock was previously
+    # silently dropped here — simulate_schedule hardcoded date.today().
+    sim_start_date: Optional[date] = None
     # Staffing-optimizer inner search (optional). When set, skip heuristic stagger.
     phase_overrides: Optional[List[int]] = None  # per-slot cycle phase
     pattern_slot_map: Optional[List[int]] = None  # per-slot index into rotation_variations
@@ -877,7 +881,7 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             slot_pat_idx = [int(config.pattern_slot_map[i]) % n_pat for i in range(n_slots)]
         else:
             slot_pat_idx = [i % n_pat for i in range(n_slots)]
-        sim_start = date.today()
+        sim_start = config.sim_start_date or date.today()
         best_phases = [0] * n_slots
         if config.phase_overrides is not None and len(config.phase_overrides) >= n_slots:
             best_phases = [int(config.phase_overrides[i]) % max(cycle_length, 1) for i in range(n_slots)]
@@ -923,11 +927,11 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
 
         cycle_length = get_active_rotation_cycle_length()
         squad_a_days = set(get_active_squad_a_days())
-        sim_start = date.today()
+        sim_start = config.sim_start_date or date.today()
     else:
         cycle_length = preset["cycle_length"]
         squad_a_days = set(preset.get("squad_a_days", {1, 2, 5, 6, 7, 10, 11}))
-        sim_start = date.today()
+        sim_start = config.sim_start_date or date.today()
 
     # Rust path only when not using custom multi-block / FLSA hard / 24/7 / extra windows
     use_rust = (
