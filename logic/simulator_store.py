@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Dict, List, Optional
 
-from database import get_connection
+from database import connection
 from logic.users import log_audit_action
 from validators import normalize_optional_text
 
@@ -25,31 +25,29 @@ def save_simulator_scenario(
     if tag_list:
         # Tags stored in notes prefix for schema compatibility (no migration)
         note_body = f"[tags:{','.join(tag_list)}] {note_body}".strip()
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO simulator_scenarios (name, config_json, result_json, notes, created_by_user_id)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                label,
-                json.dumps(config or {}),
-                json.dumps(result) if result else None,
-                note_body,
-                user_id,
-            ),
-        )
-        scenario_id = cursor.lastrowid
-        conn.commit()
-        log_audit_action("simulator.save_scenario", "simulator_scenario", scenario_id, user_id, label)
-        return {"success": True, "scenario_id": scenario_id}
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO simulator_scenarios (name, config_json, result_json, notes, created_by_user_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    label,
+                    json.dumps(config or {}),
+                    json.dumps(result) if result else None,
+                    note_body,
+                    user_id,
+                ),
+            )
+            scenario_id = cursor.lastrowid
+            conn.commit()
+            log_audit_action("simulator.save_scenario", "simulator_scenario", scenario_id, user_id, label)
+            return {"success": True, "scenario_id": scenario_id}
+        except Exception as exc:
+            conn.rollback()
+            return {"success": False, "message": str(exc)}
 
 
 def _parse_tags_from_notes(notes: Optional[str]) -> List[str]:
@@ -61,36 +59,34 @@ def _parse_tags_from_notes(notes: Optional[str]) -> List[str]:
 
 
 def list_simulator_scenarios(*, limit: int = 30, tag: Optional[str] = None) -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, name, notes, created_at, created_by_user_id
-        FROM simulator_scenarios
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (max(limit, 80) if tag else limit,),
-    )
-    rows = []
-    for r in cursor.fetchall():
-        d = dict(r)
-        d["tags"] = _parse_tags_from_notes(d.get("notes"))
-        if tag and tag not in d["tags"]:
-            continue
-        rows.append(d)
-        if len(rows) >= limit:
-            break
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, name, notes, created_at, created_by_user_id
+            FROM simulator_scenarios
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(limit, 80) if tag else limit,),
+        )
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            d["tags"] = _parse_tags_from_notes(d.get("notes"))
+            if tag and tag not in d["tags"]:
+                continue
+            rows.append(d)
+            if len(rows) >= limit:
+                break
     return rows
 
 
 def get_simulator_scenario(scenario_id: int) -> Optional[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM simulator_scenarios WHERE id = ?", (scenario_id,))
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM simulator_scenarios WHERE id = ?", (scenario_id,))
+        row = cursor.fetchone()
     if not row:
         return None
     data = dict(row)

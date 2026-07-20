@@ -3,22 +3,21 @@
 from typing import Dict, List, Optional
 
 from auth_password import hash_password, verify_password
-from database import get_connection
+from database import connection
 from logic.officers import get_officer_by_id
 
 
 def list_login_users() -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT u.*, o.name AS officer_name
-        FROM app_users u
-        LEFT JOIN officers o ON u.officer_id = o.id
-        WHERE u.active = 1
-        ORDER BY u.role, u.username
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.*, o.name AS officer_name
+            FROM app_users u
+            LEFT JOIN officers o ON u.officer_id = o.id
+            WHERE u.active = 1
+            ORDER BY u.role, u.username
+        """)
+        rows = cursor.fetchall()
     users = [dict(row) for row in rows]
     for user in users:
         user.pop("password", None)
@@ -31,19 +30,18 @@ def authenticate_user(username: str, password: str) -> Dict:
     if ldap_auth_enabled():
         ldap_result = try_ldap_authenticate(username, password)
         if ldap_result.get("success"):
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT u.*, o.name AS officer_name
-                FROM app_users u
-                LEFT JOIN officers o ON u.officer_id = o.id
-                WHERE u.username = ? AND u.active = 1
-                """,
-                (ldap_result.get("ldap_username") or username.strip(),),
-            )
-            row = cursor.fetchone()
-            conn.close()
+            with connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT u.*, o.name AS officer_name
+                    FROM app_users u
+                    LEFT JOIN officers o ON u.officer_id = o.id
+                    WHERE u.username = ? AND u.active = 1
+                    """,
+                    (ldap_result.get("ldap_username") or username.strip(),),
+                )
+                row = cursor.fetchone()
             if row:
                 user = dict(row)
                 user.pop("password", None)
@@ -56,19 +54,18 @@ def authenticate_user(username: str, password: str) -> Dict:
         if not ldap_result.get("skipped"):
             return {"success": False, "message": ldap_result.get("message", "LDAP authentication failed")}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT u.*, o.name AS officer_name
-        FROM app_users u
-        LEFT JOIN officers o ON u.officer_id = o.id
-        WHERE u.username = ? AND u.active = 1
-    """,
-        (username.strip(),),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.*, o.name AS officer_name
+            FROM app_users u
+            LEFT JOIN officers o ON u.officer_id = o.id
+            WHERE u.username = ? AND u.active = 1
+        """,
+            (username.strip(),),
+        )
+        row = cursor.fetchone()
     if not row:
         return {"success": False, "message": "Invalid username or password"}
     user = dict(row)
@@ -97,68 +94,62 @@ def create_app_user(
         if not check.ok:
             return {"success": False, "message": check.message}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT id FROM app_users WHERE username = ?", (username.strip(),))
-        if cursor.fetchone():
-            return {"success": False, "message": "Username already exists"}
-        if officer_id is not None:
-            officer = get_officer_by_id(officer_id)
-            if not officer:
-                return {"success": False, "message": "Linked officer not found"}
-            cursor.execute(
-                "SELECT id FROM app_users WHERE officer_id = ? AND active = 1",
-                (officer_id,),
-            )
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT id FROM app_users WHERE username = ?", (username.strip(),))
             if cursor.fetchone():
-                return {"success": False, "message": "Officer already has an active login"}
+                return {"success": False, "message": "Username already exists"}
+            if officer_id is not None:
+                officer = get_officer_by_id(officer_id)
+                if not officer:
+                    return {"success": False, "message": "Linked officer not found"}
+                cursor.execute(
+                    "SELECT id FROM app_users WHERE officer_id = ? AND active = 1",
+                    (officer_id,),
+                )
+                if cursor.fetchone():
+                    return {"success": False, "message": "Officer already has an active login"}
 
-        from auth_password import hash_password
+            from auth_password import hash_password
 
-        cursor.execute(
-            """
-            INSERT INTO app_users
-            (officer_id, username, password, role, must_change_password)
-            VALUES (?, ?, ?, ?, ?)
-        """,
-            (
-                officer_id,
-                username.strip(),
-                hash_password(password),
-                role,
-                1 if must_change_password else 0,
-            ),
-        )
-        user_id = cursor.lastrowid
-        conn.commit()
-        log_audit_action(
-            "user.create",
-            "app_user",
-            user_id,
-            actor_user_id,
-            f"{username.strip()} ({role})",
-        )
-        return {"success": True, "user_id": user_id, "message": "User created"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            cursor.execute(
+                """
+                INSERT INTO app_users
+                (officer_id, username, password, role, must_change_password)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (
+                    officer_id,
+                    username.strip(),
+                    hash_password(password),
+                    role,
+                    1 if must_change_password else 0,
+                ),
+            )
+            user_id = cursor.lastrowid
+            conn.commit()
+            log_audit_action(
+                "user.create",
+                "app_user",
+                user_id,
+                actor_user_id,
+                f"{username.strip()} ({role})",
+            )
+            return {"success": True, "user_id": user_id, "message": "User created"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def _upgrade_password_hash(user_id: int, plaintext: str) -> None:
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
+    with connection() as conn:
+        cursor = conn.cursor()
         cursor.execute(
             "UPDATE app_users SET password = ? WHERE id = ?",
             (hash_password(plaintext), user_id),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def admin_reset_user_password(
@@ -175,21 +166,19 @@ def admin_reset_user_password(
     if not get_user_by_id(user_id):
         return {"success": False, "message": "User not found"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "UPDATE app_users SET password = ?, must_change_password = ? WHERE id = ?",
-            (hash_password(new_password), 1 if must_change_password else 0, user_id),
-        )
-        conn.commit()
-        log_audit_action("user.password_reset", "app_user", user_id, actor_user_id)
-        return {"success": True, "message": "Password reset"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE app_users SET password = ?, must_change_password = ? WHERE id = ?",
+                (hash_password(new_password), 1 if must_change_password else 0, user_id),
+            )
+            conn.commit()
+            log_audit_action("user.password_reset", "app_user", user_id, actor_user_id)
+            return {"success": True, "message": "Password reset"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def allowed_roles_for_actor(actor_user_id: Optional[int]) -> List[str]:
@@ -219,21 +208,19 @@ def change_own_password(user_id: int, current_password: str, new_password: str) 
     if not verify_password(current_password, user["password"]):
         return {"success": False, "message": "Current password is incorrect"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "UPDATE app_users SET password = ?, must_change_password = 0 WHERE id = ?",
-            (hash_password(new_password), user_id),
-        )
-        conn.commit()
-        log_audit_action("user.password_change", "app_user", user_id, user_id)
-        return {"success": True, "message": "Password updated"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE app_users SET password = ?, must_change_password = 0 WHERE id = ?",
+                (hash_password(new_password), user_id),
+            )
+            conn.commit()
+            log_audit_action("user.password_change", "app_user", user_id, user_id)
+            return {"success": True, "message": "Password updated"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def clear_must_change_password(user_id: int, actor_user_id: Optional[int] = None) -> Dict:
@@ -242,26 +229,24 @@ def clear_must_change_password(user_id: int, actor_user_id: Optional[int] = None
     if not user:
         return {"success": False, "message": "User not found"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "UPDATE app_users SET must_change_password = 0 WHERE id = ?",
-            (user_id,),
-        )
-        conn.commit()
-        log_audit_action(
-            "user.clear_must_change_password",
-            "app_user",
-            user_id,
-            actor_user_id,
-        )
-        return {"success": True, "message": "Password change requirement cleared"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE app_users SET must_change_password = 0 WHERE id = ?",
+                (user_id,),
+            )
+            conn.commit()
+            log_audit_action(
+                "user.clear_must_change_password",
+                "app_user",
+                user_id,
+                actor_user_id,
+            )
+            return {"success": True, "message": "Password change requirement cleared"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def complete_initial_setup(
@@ -280,19 +265,18 @@ def complete_initial_setup(
 
 
 def get_user_by_id(user_id: int) -> Optional[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT u.*, o.name AS officer_name
-        FROM app_users u
-        LEFT JOIN officers o ON u.officer_id = o.id
-        WHERE u.id = ?
-    """,
-        (user_id,),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.*, o.name AS officer_name
+            FROM app_users u
+            LEFT JOIN officers o ON u.officer_id = o.id
+            WHERE u.id = ?
+        """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
     return dict(row) if row else None
 
 
@@ -303,8 +287,6 @@ def is_setup_complete() -> bool:
 
 
 def list_all_users(include_inactive: bool = True) -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT u.id, u.officer_id, u.username, u.role, u.active,
                u.must_change_password, u.created_at, o.name AS officer_name
@@ -314,9 +296,10 @@ def list_all_users(include_inactive: bool = True) -> List[Dict]:
     if not include_inactive:
         query += " WHERE u.active = 1"
     query += " ORDER BY u.active DESC, u.role, u.username"
-    cursor.execute(query)
-    rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        rows = [dict(row) for row in cursor.fetchall()]
     return rows
 
 
@@ -327,36 +310,33 @@ def log_audit_action(
     user_id: Optional[int] = None,
     details: str = "",
 ) -> None:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO audit_log (action, entity_type, entity_id, user_id, details)
-        VALUES (?, ?, ?, ?, ?)
-    """,
-        (action, entity_type or None, entity_id, user_id, details or None),
-    )
-    conn.commit()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO audit_log (action, entity_type, entity_id, user_id, details)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (action, entity_type or None, entity_id, user_id, details or None),
+        )
+        conn.commit()
 
 
 def set_app_user_active(user_id: int, active: bool, actor_user_id: Optional[int] = None) -> Dict:
     user = get_user_by_id(user_id)
     if not user:
         return {"success": False, "message": "User not found"}
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("UPDATE app_users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
-        conn.commit()
-        action = "user.activate" if active else "user.deactivate"
-        log_audit_action(action, "app_user", user_id, actor_user_id)
-        return {"success": True, "message": "User deactivated" if not active else "User activated"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE app_users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
+            conn.commit()
+            action = "user.activate" if active else "user.deactivate"
+            log_audit_action(action, "app_user", user_id, actor_user_id)
+            return {"success": True, "message": "User deactivated" if not active else "User activated"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def update_app_user(
@@ -393,34 +373,32 @@ def update_app_user(
             if not auth.ok:
                 return {"success": False, "message": auth.message}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        new_officer_id = user["officer_id"]
-        if clear_officer_link:
-            new_officer_id = None
-        elif officer_id is not None:
-            officer = get_officer_by_id(officer_id)
-            if not officer:
-                return {"success": False, "message": "Linked officer not found"}
-            cursor.execute(
-                "SELECT id FROM app_users WHERE officer_id = ? AND active = 1 AND id != ?",
-                (officer_id, user_id),
-            )
-            if cursor.fetchone():
-                return {"success": False, "message": "Officer already has an active login"}
-            new_officer_id = officer_id
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            new_officer_id = user["officer_id"]
+            if clear_officer_link:
+                new_officer_id = None
+            elif officer_id is not None:
+                officer = get_officer_by_id(officer_id)
+                if not officer:
+                    return {"success": False, "message": "Linked officer not found"}
+                cursor.execute(
+                    "SELECT id FROM app_users WHERE officer_id = ? AND active = 1 AND id != ?",
+                    (officer_id, user_id),
+                )
+                if cursor.fetchone():
+                    return {"success": False, "message": "Officer already has an active login"}
+                new_officer_id = officer_id
 
-        new_role = role if role is not None else user["role"]
-        cursor.execute(
-            "UPDATE app_users SET role = ?, officer_id = ? WHERE id = ?",
-            (new_role, new_officer_id, user_id),
-        )
-        conn.commit()
-        log_audit_action("user.update", "app_user", user_id, actor_user_id)
-        return {"success": True, "message": "User updated"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            new_role = role if role is not None else user["role"]
+            cursor.execute(
+                "UPDATE app_users SET role = ?, officer_id = ? WHERE id = ?",
+                (new_role, new_officer_id, user_id),
+            )
+            conn.commit()
+            log_audit_action("user.update", "app_user", user_id, actor_user_id)
+            return {"success": True, "message": "User updated"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}

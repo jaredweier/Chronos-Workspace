@@ -14,7 +14,7 @@ from config import (
     FLSA_LE_WEEKLY_THRESHOLD,
     MAX_CONSECUTIVE_WORK_DAYS,
 )
-from database import get_connection
+from database import connection
 from logic.officers import get_officers_by_seniority
 from logic.scheduling import get_officer_day_status
 from validators import format_date, is_officer_active, parse_date, storage_date_str
@@ -203,18 +203,17 @@ def get_flsa_207k_work_period(reference: Optional[date] = None) -> Tuple[date, d
 
 def sum_officer_work_hours(officer_id: int, start_date: date, end_date: date) -> float:
     """Sum hours worked from timecard entries in an inclusive date range."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT COALESCE(SUM(hours_worked), 0) AS total
-        FROM timecard_entries
-        WHERE officer_id = ? AND entry_date >= ? AND entry_date <= ?
-    """,
-        (officer_id, start_date.isoformat(), end_date.isoformat()),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(hours_worked), 0) AS total
+            FROM timecard_entries
+            WHERE officer_id = ? AND entry_date >= ? AND entry_date <= ?
+        """,
+            (officer_id, start_date.isoformat(), end_date.isoformat()),
+        )
+        row = cursor.fetchone()
     return float(row["total"] or 0.0)
 
 
@@ -666,21 +665,20 @@ def export_flsa_vs_contract_ot_csv(
         # Contract OT: timecard types that look like OT but aren't pure FLSA calc
         contract_ot = 0.0
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT entry_type, hours FROM timecard_entries
-                WHERE officer_id = ? AND entry_date >= ? AND entry_date <= ?
-                """,
-                (oid, p_start.isoformat(), p_end.isoformat()),
-            )
-            for r in cur.fetchall():
-                et = (r["entry_type"] or "").lower()
-                if any(k in et for k in ("overtime", "ot earned", "callback", "call-back", "call back")):
-                    if "comp" not in et:
-                        contract_ot += float(r["hours"] or 0)
-            conn.close()
+            with connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT entry_type, hours FROM timecard_entries
+                    WHERE officer_id = ? AND entry_date >= ? AND entry_date <= ?
+                    """,
+                    (oid, p_start.isoformat(), p_end.isoformat()),
+                )
+                for r in cur.fetchall():
+                    et = (r["entry_type"] or "").lower()
+                    if any(k in et for k in ("overtime", "ot earned", "callback", "call-back", "call back")):
+                        if "comp" not in et:
+                            contract_ot += float(r["hours"] or 0)
         except Exception:
             pass
         banks = _officer_comp_hours(oid)

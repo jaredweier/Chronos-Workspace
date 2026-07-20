@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Dict, List, Optional
 
-from database import get_connection
+from database import connection
 from logic.banked_time import BANK_TYPES
 from logic.officers import get_officer_by_id
 from logic.operations import get_officer_time_banks
@@ -69,61 +69,59 @@ def donate_leave_hours(
             "message": f"Insufficient {label} balance ({available:.1f}h available)",
         }
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        from logic.payroll import _ensure_officer_time_banks
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            from logic.payroll import _ensure_officer_time_banks
 
-        _ensure_officer_time_banks(cursor, donor_officer_id, date.today())
-        _ensure_officer_time_banks(cursor, recipient_officer_id, date.today())
+            _ensure_officer_time_banks(cursor, donor_officer_id, date.today())
+            _ensure_officer_time_banks(cursor, recipient_officer_id, date.today())
 
-        # bal_key is whitelist-only from _BANK_COLUMNS
-        cursor.execute(
-            f"""
-            UPDATE officer_time_banks
-            SET {bal_key} = {bal_key} - ?
-            WHERE officer_id = ? AND {bal_key} >= ?
-            """,
-            (hours, donor_officer_id, hours),
-        )
-        if cursor.rowcount != 1:
+            # bal_key is whitelist-only from _BANK_COLUMNS
+            cursor.execute(
+                f"""
+                UPDATE officer_time_banks
+                SET {bal_key} = {bal_key} - ?
+                WHERE officer_id = ? AND {bal_key} >= ?
+                """,
+                (hours, donor_officer_id, hours),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return {"success": False, "message": "Donation failed — concurrent balance change?"}
+
+            cursor.execute(
+                f"""
+                UPDATE officer_time_banks
+                SET {bal_key} = {bal_key} + ?
+                WHERE officer_id = ?
+                """,
+                (hours, recipient_officer_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return {"success": False, "message": "Donation failed — recipient bank row missing"}
+
+            cursor.execute(
+                """
+                INSERT INTO leave_donations
+                (donor_officer_id, recipient_officer_id, bank_type, hours, notes, status, created_by_user_id)
+                VALUES (?, ?, ?, ?, ?, 'completed', ?)
+                """,
+                (
+                    donor_officer_id,
+                    recipient_officer_id,
+                    bank_type,
+                    hours,
+                    notes or None,
+                    user_id,
+                ),
+            )
+            donation_id = cursor.lastrowid
+            conn.commit()
+        except Exception as exc:
             conn.rollback()
-            return {"success": False, "message": "Donation failed — concurrent balance change?"}
-
-        cursor.execute(
-            f"""
-            UPDATE officer_time_banks
-            SET {bal_key} = {bal_key} + ?
-            WHERE officer_id = ?
-            """,
-            (hours, recipient_officer_id),
-        )
-        if cursor.rowcount != 1:
-            conn.rollback()
-            return {"success": False, "message": "Donation failed — recipient bank row missing"}
-
-        cursor.execute(
-            """
-            INSERT INTO leave_donations
-            (donor_officer_id, recipient_officer_id, bank_type, hours, notes, status, created_by_user_id)
-            VALUES (?, ?, ?, ?, ?, 'completed', ?)
-            """,
-            (
-                donor_officer_id,
-                recipient_officer_id,
-                bank_type,
-                hours,
-                notes or None,
-                user_id,
-            ),
-        )
-        donation_id = cursor.lastrowid
-        conn.commit()
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+            return {"success": False, "message": str(exc)}
 
     log_audit_action(
         "leave.donation",
@@ -162,23 +160,22 @@ def donate_leave_hours(
 
 
 def list_leave_donations(limit: int = 50, officer_id: Optional[int] = None) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    q = """
-        SELECT d.*,
-               don.name AS donor_name,
-               rec.name AS recipient_name
-        FROM leave_donations d
-        JOIN officers don ON d.donor_officer_id = don.id
-        JOIN officers rec ON d.recipient_officer_id = rec.id
-    """
-    params: List = []
-    if officer_id:
-        q += " WHERE d.donor_officer_id = ? OR d.recipient_officer_id = ?"
-        params.extend([officer_id, officer_id])
-    q += " ORDER BY d.id DESC LIMIT ?"
-    params.append(limit)
-    cursor.execute(q, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        q = """
+            SELECT d.*,
+                   don.name AS donor_name,
+                   rec.name AS recipient_name
+            FROM leave_donations d
+            JOIN officers don ON d.donor_officer_id = don.id
+            JOIN officers rec ON d.recipient_officer_id = rec.id
+        """
+        params: List = []
+        if officer_id:
+            q += " WHERE d.donor_officer_id = ? OR d.recipient_officer_id = ?"
+            params.extend([officer_id, officer_id])
+        q += " ORDER BY d.id DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(q, params)
+        rows = [dict(r) for r in cursor.fetchall()]
     return {"success": True, "count": len(rows), "donations": rows}

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
-from database import get_connection
+from database import connection
 from validators import format_date, parse_date
 
 COURT_TYPES = ("Court", "Training")
@@ -33,24 +33,23 @@ def list_court_training_events(
     if end_d < start_d:
         start_d, end_d = end_d, start_d
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    q = """
-        SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
-        FROM day_off_requests r
-        JOIN officers o ON r.officer_id = o.id
-        WHERE r.request_type IN ('Court', 'Training')
-          AND r.request_date >= ? AND r.request_date <= ?
-    """
-    params: list = [start_d.isoformat(), end_d.isoformat()]
-    if status:
-        q += " AND r.status = ?"
-        params.append(status)
-    q += " ORDER BY r.request_date ASC, r.request_type ASC, o.name ASC LIMIT ?"
-    params.append(int(limit))
-    cursor.execute(q, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        q = """
+            SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
+            FROM day_off_requests r
+            JOIN officers o ON r.officer_id = o.id
+            WHERE r.request_type IN ('Court', 'Training')
+              AND r.request_date >= ? AND r.request_date <= ?
+        """
+        params: list = [start_d.isoformat(), end_d.isoformat()]
+        if status:
+            q += " AND r.status = ?"
+            params.append(status)
+        q += " ORDER BY r.request_date ASC, r.request_type ASC, o.name ASC LIMIT ?"
+        params.append(int(limit))
+        cursor.execute(q, params)
+        rows = [dict(r) for r in cursor.fetchall()]
 
     events: List[Dict] = []
     for r in rows:

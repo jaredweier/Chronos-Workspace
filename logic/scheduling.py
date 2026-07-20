@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 import config
-from database import get_connection
+from database import connection
 from logic import rust_bridge, rust_fallback
 from logic.officers import get_officer_by_id, get_officers_by_seniority
 from logic.rotation_config import (
@@ -41,25 +41,24 @@ def get_generated_schedule_day_context(target_date: date) -> Dict[int, Dict[str,
             "shift_end": officer.get("shift_end") or "",
         }
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT replacement_officer_id, covered_shift_start
-        FROM schedule_overrides
-        WHERE override_date = ? AND replacement_officer_id IS NOT NULL
-        """,
-        (date_key,),
-    )
-    for row in cursor.fetchall():
-        rid = row["replacement_officer_id"]
-        if rid not in context or context[rid]["status"] != "covering":
-            continue
-        covered = row["covered_shift_start"]
-        if covered:
-            context[rid]["shift_start"] = covered
-            context[rid]["shift_end"] = shift_end_for_start_active(covered)
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT replacement_officer_id, covered_shift_start
+            FROM schedule_overrides
+            WHERE override_date = ? AND replacement_officer_id IS NOT NULL
+            """,
+            (date_key,),
+        )
+        for row in cursor.fetchall():
+            rid = row["replacement_officer_id"]
+            if rid not in context or context[rid]["status"] != "covering":
+                continue
+            covered = row["covered_shift_start"]
+            if covered:
+                context[rid]["shift_start"] = covered
+                context[rid]["shift_end"] = shift_end_for_start_active(covered)
 
     from logic.snapshots import get_schedule_snapshot
 
@@ -216,22 +215,21 @@ def get_shift_coverage_counts_for_range(
     end_str = end_date.strftime("%Y-%m-%d")
     shift_starts = [start for start, _ in get_active_shift_times().values()]
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, squad, shift_start, active, job_title FROM officers WHERE active = 1
-    """)
-    officers = [dict(row) for row in cursor.fetchall()]
-    cursor.execute(
-        """
-        SELECT override_date, original_officer_id, replacement_officer_id, covered_shift_start
-        FROM schedule_overrides
-        WHERE override_date >= ? AND override_date <= ?
-    """,
-        (start_str, end_str),
-    )
-    overrides = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, squad, shift_start, active, job_title FROM officers WHERE active = 1
+        """)
+        officers = [dict(row) for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT override_date, original_officer_id, replacement_officer_id, covered_shift_start
+            FROM schedule_overrides
+            WHERE override_date >= ? AND override_date <= ?
+        """,
+            (start_str, end_str),
+        )
+        overrides = [dict(row) for row in cursor.fetchall()]
 
     override_rows = [
         (

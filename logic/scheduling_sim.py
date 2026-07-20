@@ -11,6 +11,32 @@ from typing import Dict, List, Optional
 from validators import parse_date
 
 
+def _parse_sim_start(val):
+    from datetime import date as _date
+
+    if val is None:
+        return None
+    if isinstance(val, _date):
+        return val
+    try:
+        return _date.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_sim_start(val):
+    from datetime import date as _date
+
+    if val is None:
+        return None
+    if isinstance(val, _date):
+        return val
+    try:
+        return _date.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
 def run_schedule_simulation(
     rotation_type: str,
     num_officers: int,
@@ -40,9 +66,21 @@ def run_schedule_simulation(
     allow_offday_coverage: bool = False,
     min_rest_hours: float = 0.0,
     max_consecutive_work_days: int = 0,
+    sim_start_date=None,
+    phase_limit: int = 3,
 ) -> Dict:
     from config import NIGHT_MINIMUM_OFFICERS
+    from logic.staffing_config import get_staffing_config
     from simulator import SimulatorConfig, simulate_schedule
+
+    # Coalesce None → staffing config fallback so simulate_schedule always
+    # receives concrete numbers (float(None) crashes inside the sim).
+    if shift_length_hours is None or annual_hours_target is None:
+        _sc = get_staffing_config()
+        if shift_length_hours is None:
+            shift_length_hours = float(_sc.get("shift_length_hours") or 8.0)
+        if annual_hours_target is None:
+            annual_hours_target = float(_sc.get("annual_hours_target") or 2080.0)
 
     config = SimulatorConfig(
         rotation_type=rotation_type,
@@ -72,6 +110,8 @@ def run_schedule_simulation(
         allow_offday_coverage=bool(allow_offday_coverage),
         min_rest_hours=float(min_rest_hours or 0),
         max_consecutive_work_days=int(max_consecutive_work_days or 0),
+        sim_start_date=_parse_sim_start(sim_start_date),
+        phase_limit=int(phase_limit),
     )
     result = simulate_schedule(config)
     if not result.success:
@@ -139,6 +179,10 @@ def run_staffing_optimizer(
     constraint_priority: Optional[List[str]] = None,
     nearby_start_hops: int = 1,
     allow_offday_coverage: bool = False,
+    min_rest_hours: float = 0.0,
+    max_consecutive_work_days: int = 0,
+    sim_start_date=None,
+    phase_limit: int = 3,
     progress_callback=None,
     cancel_check=None,
     **_compat,
@@ -175,7 +219,9 @@ def run_staffing_optimizer(
         constraint_weights=constraint_weights,
         constraint_priority=constraint_priority,
         nearby_start_hops=int(nearby_start_hops),
-        allow_offday_coverage=bool(allow_offday_coverage),
+        allow_offday_coverage=allow_offday_coverage,
+        min_rest_hours=min_rest_hours,
+        max_consecutive_work_days=max_consecutive_work_days,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
     )
@@ -218,6 +264,13 @@ def compare_shift_length_scenarios(
     cancel_check=None,
     parallel: bool = True,
     depth: str = "deep",
+    min_rest_hours: float = 0.0,
+    max_consecutive_work_days: int = 0,
+    sim_start_date=None,
+    phase_limit: int = 3,
+    nearby_start_hops: int = 1,
+    allow_offday_coverage: bool = False,
+    **_compat,
 ) -> Dict:
     """Compare locked shift lengths (default 8/10/12h) under same coverage constraints.
 
@@ -320,7 +373,11 @@ def compare_shift_length_scenarios(
             free_lengths=False,
             free_officer_counts=False,
             free_starts=False,
-            free_variations=False,
+            free_variations=True,
+            min_rest_hours=min_rest_hours,
+            max_consecutive_work_days=max_consecutive_work_days,
+            nearby_start_hops=nearby_start_hops,
+            allow_offday_coverage=allow_offday_coverage,
             rotation_style="rotating",
             rotation_variations=vars_use,
             annual_hours_target=float(annual_hours_target),

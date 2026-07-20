@@ -12,11 +12,11 @@ import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from database import get_connection
+from database import connection
 
 
 def ensure_geofence_tables() -> None:
-    with get_connection() as conn:
+    with connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS geofence_punches (
@@ -111,7 +111,7 @@ def record_geofence_punch(
                 "distance_m": distance,
                 "within_fence": False,
             }
-    with get_connection() as conn:
+    with connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO geofence_punches
@@ -148,7 +148,7 @@ def list_geofence_punches(*, officer_id: Optional[int] = None, limit: int = 50) 
     else:
         sql = "SELECT * FROM geofence_punches ORDER BY id DESC LIMIT ?"
         params = (limit,)
-    with get_connection() as conn:
+    with connection() as conn:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 

@@ -3,28 +3,27 @@
 from datetime import date
 from typing import Dict, List, Optional
 
-from database import get_connection
+from database import connection
 from logic.officers import get_officers_by_seniority
 from logic.payroll import project_officer_annual_pay
 
 
 def get_audit_log(limit: int = 50, action_filter: Optional[str] = None) -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    query = """
-        SELECT a.*, u.username
-        FROM audit_log a
-        LEFT JOIN app_users u ON a.user_id = u.id
-    """
-    params: List = []
-    if action_filter:
-        query += " WHERE a.action LIKE ?"
-        params.append(f"%{action_filter}%")
-    query += " ORDER BY a.created_at DESC LIMIT ?"
-    params.append(limit)
-    cursor.execute(query, tuple(params))
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT a.*, u.username
+            FROM audit_log a
+            LEFT JOIN app_users u ON a.user_id = u.id
+        """
+        params: List = []
+        if action_filter:
+            query += " WHERE a.action LIKE ?"
+            params.append(f"%{action_filter}%")
+        query += " ORDER BY a.created_at DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, tuple(params))
+        rows = [dict(r) for r in cursor.fetchall()]
     return rows
 
 

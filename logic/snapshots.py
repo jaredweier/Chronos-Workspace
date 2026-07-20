@@ -9,7 +9,7 @@ from config import (
     is_high_risk_night,
     logger,
 )
-from database import get_connection
+from database import connection
 from logic.officers import get_officer_by_id, get_officers_by_seniority
 from logic.scheduling import (
     _get_monthly_rotation_base_only,
@@ -285,61 +285,59 @@ def create_manual_coverage_override(
             }
     except Exception:
         pass
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT id FROM schedule_overrides
-            WHERE override_date = ? AND original_officer_id = ?
-            """,
-            (override_date, original_officer_id),
-        )
-        if cursor.fetchone():
-            return {
-                "success": False,
-                "message": f"{original['name']} already has coverage assigned on {format_date(override_date)}",
-            }
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id FROM schedule_overrides
+                WHERE override_date = ? AND original_officer_id = ?
+                """,
+                (override_date, original_officer_id),
+            )
+            if cursor.fetchone():
+                return {
+                    "success": False,
+                    "message": f"{original['name']} already has coverage assigned on {format_date(override_date)}",
+                }
 
-        reason_text = normalize_optional_text(reason) or "Manual Coverage"
-        _insert_override_record(
-            cursor,
-            override_date,
-            original_officer_id,
-            replacement_officer_id,
-            reason_text,
-            original["shift_start"],
-        )
-        conn.commit()
-        apply_live_schedule_for_date(override_date, actor_user_id)
-        log_audit_action(
-            "schedule.manual_override",
-            "schedule_override",
-            cursor.lastrowid,
-            actor_user_id,
-            f"{original['name']} → {replacement['name']} on {override_date}",
-        )
-        create_notification(
-            replacement_officer_id,
-            "coverage",
-            "Manual coverage assignment",
-            f"You are assigned to cover {original['name']}'s {original['shift_start']} shift on {override_date}.",
-            related_id=None,
-            related_type="schedule_override",
-        )
-        return {
-            "success": True,
-            "message": (
-                f"{replacement['name']} assigned to cover {original['name']} "
-                f"({original['shift_start']}) on {override_date}"
-            ),
-        }
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Failed to create manual override: {e}")
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            reason_text = normalize_optional_text(reason) or "Manual Coverage"
+            _insert_override_record(
+                cursor,
+                override_date,
+                original_officer_id,
+                replacement_officer_id,
+                reason_text,
+                original["shift_start"],
+            )
+            conn.commit()
+            apply_live_schedule_for_date(override_date, actor_user_id)
+            log_audit_action(
+                "schedule.manual_override",
+                "schedule_override",
+                cursor.lastrowid,
+                actor_user_id,
+                f"{original['name']} → {replacement['name']} on {override_date}",
+            )
+            create_notification(
+                replacement_officer_id,
+                "coverage",
+                "Manual coverage assignment",
+                f"You are assigned to cover {original['name']}'s {original['shift_start']} shift on {override_date}.",
+                related_id=None,
+                related_type="schedule_override",
+            )
+            return {
+                "success": True,
+                "message": (
+                    f"{replacement['name']} assigned to cover {original['name']} "
+                    f"({original['shift_start']}) on {override_date}"
+                ),
+            }
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to create manual override: {e}")
+            return {"success": False, "message": str(e)}
 
 
 def create_override_record(
@@ -349,25 +347,23 @@ def create_override_record(
     reason,
     covered_shift_start: Optional[str] = None,
 ) -> bool:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        _insert_override_record(
-            cursor,
-            override_date,
-            original_officer_id,
-            replacement_officer_id,
-            reason,
-            covered_shift_start,
-        )
-        conn.commit()
-        return True
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Failed to create override: {e}")
-        return False
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            _insert_override_record(
+                cursor,
+                override_date,
+                original_officer_id,
+                replacement_officer_id,
+                reason,
+                covered_shift_start,
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to create override: {e}")
+            return False
 
 
 def get_monthly_summary_from_snapshot(
@@ -447,36 +443,34 @@ def get_officer_schedule_window(
 def get_schedule_snapshot(year: int, month: int, schedule_type: str) -> Optional[Dict]:
     if schedule_type not in SCHEDULE_SNAPSHOT_TYPES:
         return None
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM schedule_snapshots
-        WHERE year = ? AND month = ? AND schedule_type = ?
-    """,
-        (year, month, schedule_type),
-    )
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return None
-    snapshot = dict(row)
-    cursor.execute(
-        """
-        SELECT r.id, r.snapshot_id, r.assignment_date, r.officer_id, r.status,
-               r.shift_start AS assigned_shift_start, r.shift_end AS assigned_shift_end,
-               r.is_manual, r.notes,
-               o.name AS officer_name, o.squad,
-               o.shift_start AS home_shift_start, o.shift_end AS home_shift_end
-        FROM schedule_snapshot_rows r
-        JOIN officers o ON r.officer_id = o.id
-        WHERE r.snapshot_id = ?
-        ORDER BY r.assignment_date, o.name
-    """,
-        (snapshot["id"],),
-    )
-    snapshot["rows"] = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM schedule_snapshots
+            WHERE year = ? AND month = ? AND schedule_type = ?
+        """,
+            (year, month, schedule_type),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        snapshot = dict(row)
+        cursor.execute(
+            """
+            SELECT r.id, r.snapshot_id, r.assignment_date, r.officer_id, r.status,
+                   r.shift_start AS assigned_shift_start, r.shift_end AS assigned_shift_end,
+                   r.is_manual, r.notes,
+                   o.name AS officer_name, o.squad,
+                   o.shift_start AS home_shift_start, o.shift_end AS home_shift_end
+            FROM schedule_snapshot_rows r
+            JOIN officers o ON r.officer_id = o.id
+            WHERE r.snapshot_id = ?
+            ORDER BY r.assignment_date, o.name
+        """,
+            (snapshot["id"],),
+        )
+        snapshot["rows"] = [dict(r) for r in cursor.fetchall()]
     return snapshot
 
 
@@ -595,51 +589,49 @@ def ensure_original_monthly_schedule(
     created = False
     snapshot_id: Optional[int] = None
     base_message = "Original monthly schedule already generated"
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT id, locked FROM schedule_snapshots
-            WHERE year = ? AND month = ? AND schedule_type = 'base'
-        """,
-            (year, month),
-        )
-        existing = cursor.fetchone()
-        if existing and existing["locked"]:
-            snapshot_id = existing["id"]
-            created = False
-            base_message = "Original monthly schedule already generated"
-        else:
-            if existing:
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, locked FROM schedule_snapshots
+                WHERE year = ? AND month = ? AND schedule_type = 'base'
+            """,
+                (year, month),
+            )
+            existing = cursor.fetchone()
+            if existing and existing["locked"]:
                 snapshot_id = existing["id"]
-                cursor.execute(
-                    """
-                    UPDATE schedule_snapshots
-                    SET generated_at = CURRENT_TIMESTAMP, generated_by_user_id = ?, locked = 1
-                    WHERE id = ?
-                """,
-                    (user_id, snapshot_id),
-                )
+                created = False
+                base_message = "Original monthly schedule already generated"
             else:
-                cursor.execute(
-                    """
-                    INSERT INTO schedule_snapshots (year, month, schedule_type, locked, generated_by_user_id)
-                    VALUES (?, ?, 'base', 1, ?)
-                """,
-                    (year, month, user_id),
-                )
-                snapshot_id = cursor.lastrowid
+                if existing:
+                    snapshot_id = existing["id"]
+                    cursor.execute(
+                        """
+                        UPDATE schedule_snapshots
+                        SET generated_at = CURRENT_TIMESTAMP, generated_by_user_id = ?, locked = 1
+                        WHERE id = ?
+                    """,
+                        (user_id, snapshot_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO schedule_snapshots (year, month, schedule_type, locked, generated_by_user_id)
+                        VALUES (?, ?, 'base', 1, ?)
+                    """,
+                        (year, month, user_id),
+                    )
+                    snapshot_id = cursor.lastrowid
 
-            _insert_snapshot_rows(cursor, snapshot_id, year, month, use_overrides=False)
-            conn.commit()
-            created = True
-            base_message = "Original monthly schedule generated"
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+                _insert_snapshot_rows(cursor, snapshot_id, year, month, use_overrides=False)
+                conn.commit()
+                created = True
+                base_message = "Original monthly schedule generated"
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
     if snapshot_id is None:
         return {"success": False, "message": "Failed to resolve base snapshot"}
@@ -672,58 +664,56 @@ def _sync_updated_schedule_only(
     """Build/update live snapshot without re-entering ensure_original (avoids recursion)."""
     from logic.requests import _notify_schedule_published
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT id FROM schedule_snapshots
-            WHERE year = ? AND month = ? AND schedule_type = 'updated'
-        """,
-            (year, month),
-        )
-        row = cursor.fetchone()
-        if row:
-            snapshot_id = row["id"]
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
             cursor.execute(
                 """
-                UPDATE schedule_snapshots
-                SET generated_at = CURRENT_TIMESTAMP, generated_by_user_id = ?
-                WHERE id = ?
+                SELECT id FROM schedule_snapshots
+                WHERE year = ? AND month = ? AND schedule_type = 'updated'
             """,
-                (user_id, snapshot_id),
+                (year, month),
             )
-        else:
+            row = cursor.fetchone()
+            if row:
+                snapshot_id = row["id"]
+                cursor.execute(
+                    """
+                    UPDATE schedule_snapshots
+                    SET generated_at = CURRENT_TIMESTAMP, generated_by_user_id = ?
+                    WHERE id = ?
+                """,
+                    (user_id, snapshot_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO schedule_snapshots (year, month, schedule_type, generated_by_user_id)
+                    VALUES (?, ?, 'updated', ?)
+                """,
+                    (year, month, user_id),
+                )
+                snapshot_id = cursor.lastrowid
+
             cursor.execute(
                 """
-                INSERT INTO schedule_snapshots (year, month, schedule_type, generated_by_user_id)
-                VALUES (?, ?, 'updated', ?)
+                SELECT assignment_date, officer_id, status, shift_start, shift_end, notes
+                FROM schedule_snapshot_rows
+                WHERE snapshot_id = ? AND is_manual = 1
             """,
-                (year, month, user_id),
+                (snapshot_id,),
             )
-            snapshot_id = cursor.lastrowid
+            preserve = {(r["assignment_date"], r["officer_id"]): dict(r) for r in cursor.fetchall()}
 
-        cursor.execute(
-            """
-            SELECT assignment_date, officer_id, status, shift_start, shift_end, notes
-            FROM schedule_snapshot_rows
-            WHERE snapshot_id = ? AND is_manual = 1
-        """,
-            (snapshot_id,),
-        )
-        preserve = {(r["assignment_date"], r["officer_id"]): dict(r) for r in cursor.fetchall()}
-
-        _insert_snapshot_rows(cursor, snapshot_id, year, month, use_overrides=True, preserve_manual=preserve)
-        conn.commit()
-        if notify:
-            _notify_schedule_published(year, month, snapshot_id)
-        message = "Live schedule published and staff notified" if notify else "Live schedule updated"
-        return {"success": True, "snapshot_id": snapshot_id, "message": message}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            _insert_snapshot_rows(cursor, snapshot_id, year, month, use_overrides=True, preserve_manual=preserve)
+            conn.commit()
+            if notify:
+                _notify_schedule_published(year, month, snapshot_id)
+            message = "Live schedule published and staff notified" if notify else "Live schedule updated"
+            return {"success": True, "snapshot_id": snapshot_id, "message": message}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def publish_base_schedule(year: int, month: int, user_id: int) -> Dict:
@@ -785,38 +775,36 @@ def set_snapshot_assignment(
             if not check.ok:
                 return {"success": False, "message": check.message or "Invalid shift band"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO schedule_snapshot_rows
-            (snapshot_id, assignment_date, officer_id, status, shift_start, shift_end, is_manual, notes)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-            ON CONFLICT(snapshot_id, assignment_date, officer_id) DO UPDATE SET
-                status = excluded.status,
-                shift_start = excluded.shift_start,
-                shift_end = excluded.shift_end,
-                is_manual = 1,
-                notes = excluded.notes
-        """,
-            (
-                snapshot["id"],
-                assignment_date,
-                officer_id,
-                status,
-                effective_start,
-                effective_end,
-                notes or None,
-            ),
-        )
-        conn.commit()
-        return {"success": True}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO schedule_snapshot_rows
+                (snapshot_id, assignment_date, officer_id, status, shift_start, shift_end, is_manual, notes)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(snapshot_id, assignment_date, officer_id) DO UPDATE SET
+                    status = excluded.status,
+                    shift_start = excluded.shift_start,
+                    shift_end = excluded.shift_end,
+                    is_manual = 1,
+                    notes = excluded.notes
+            """,
+                (
+                    snapshot["id"],
+                    assignment_date,
+                    officer_id,
+                    status,
+                    effective_start,
+                    effective_end,
+                    notes or None,
+                ),
+            )
+            conn.commit()
+            return {"success": True}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def apply_live_schedule_for_date(override_date: str, user_id: Optional[int] = None) -> Dict:

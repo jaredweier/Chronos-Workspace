@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from database import get_connection
+from database import connection
 
 PUNCH_REQUIRED_KEY = "punch_required"
 
@@ -22,7 +22,7 @@ def ensure_punch_tables() -> None:
     from logic.geofence_clock import ensure_geofence_tables
 
     ensure_geofence_tables()
-    with get_connection() as conn:
+    with connection() as conn:
         # Extra columns on punches for audit of applied edits
         cols = {r[1] for r in conn.execute("PRAGMA table_info(geofence_punches)").fetchall()}
         if "edited" not in cols:
@@ -215,7 +215,7 @@ def request_punch_edit(
     except ValueError as exc:
         return {"success": False, "message": str(exc)}
 
-    with get_connection() as conn:
+    with connection() as conn:
         row = conn.execute(
             "SELECT * FROM geofence_punches WHERE id = ? AND officer_id = ?",
             (int(punch_id), int(officer_id)),
@@ -359,7 +359,7 @@ def list_punch_edit_requests(
         params.append(int(officer_id))
     sql += " ORDER BY r.id DESC LIMIT ?"
     params.append(limit)
-    with get_connection() as conn:
+    with connection() as conn:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
@@ -370,7 +370,7 @@ def approve_punch_edit(
     review_notes: str = "",
 ) -> Dict[str, Any]:
     ensure_punch_tables()
-    with get_connection() as conn:
+    with connection() as conn:
         row = conn.execute(
             "SELECT * FROM punch_edit_requests WHERE id = ?",
             (int(request_id),),
@@ -445,7 +445,7 @@ def reject_punch_edit(
 ) -> Dict[str, Any]:
     ensure_punch_tables()
     notes = (review_notes or "").strip()
-    with get_connection() as conn:
+    with connection() as conn:
         row = conn.execute(
             "SELECT * FROM punch_edit_requests WHERE id = ?",
             (int(request_id),),

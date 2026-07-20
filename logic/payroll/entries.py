@@ -10,7 +10,7 @@ from config import (
     PAYROLL_ENTRY_TYPES,
     TIMECARD_REGULAR_TYPE,
 )
-from database import get_connection
+from database import connection
 from logic.officers import get_officer_by_id
 from logic.payroll.banks import _ensure_officer_time_banks
 from logic.payroll.pay_codes import calculate_pay_for_entry, get_pay_code_rules
@@ -54,75 +54,73 @@ def create_payroll_entry(
     if is_pay_period_locked(pay_start):
         return {"success": False, "message": "Pay period is locked — payroll entries disabled"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        banks = _ensure_officer_time_banks(cursor, officer_id, parsed_date)
-        calc = calculate_pay_for_entry(
-            entry_type,
-            hours,
-            officer["pay_rate"],
-            night_differential_hours=night_differential_hours,
-            night_differential_rate=officer.get("night_differential_rate", 1.0),
-            is_holiday_overtime=is_holiday_overtime,
-            banks=banks,
-        )
-        if calc.message:
-            conn.rollback()
-            return {"success": False, "message": calc.message}
-
-        cursor.execute(
-            """
-            INSERT INTO payroll_entries
-            (officer_id, entry_date, entry_type, hours, night_differential_hours, calculated_pay,
-             comp_bank_delta, sick_bank_delta, float_holiday_bank_delta, holiday_bank_delta, notes,
-             pay_period_start)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                officer_id,
-                entry_date,
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            banks = _ensure_officer_time_banks(cursor, officer_id, parsed_date)
+            calc = calculate_pay_for_entry(
                 entry_type,
                 hours,
-                night_differential_hours,
-                calc.total_pay,
-                calc.comp_bank_delta,
-                calc.sick_bank_delta,
-                calc.float_holiday_bank_delta,
-                calc.holiday_bank_delta,
-                notes,
-                pay_start.isoformat(),
-            ),
-        )
-        cursor.execute(
-            """
-            UPDATE officer_time_banks
-            SET comp_hours = comp_hours + ?,
-                sick_hours = sick_hours + ?,
-                float_holiday_hours = float_holiday_hours + ?,
-                holiday_hours = holiday_hours + ?
-            WHERE officer_id = ?
-        """,
-            (
-                calc.comp_bank_delta,
-                calc.sick_bank_delta,
-                calc.float_holiday_bank_delta,
-                calc.holiday_bank_delta,
-                officer_id,
-            ),
-        )
-        conn.commit()
-        return {
-            "success": True,
-            "entry_id": cursor.lastrowid,
-            "calculated_pay": calc.total_pay,
-            "breakdown": calc,
-        }
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+                officer["pay_rate"],
+                night_differential_hours=night_differential_hours,
+                night_differential_rate=officer.get("night_differential_rate", 1.0),
+                is_holiday_overtime=is_holiday_overtime,
+                banks=banks,
+            )
+            if calc.message:
+                conn.rollback()
+                return {"success": False, "message": calc.message}
+
+            cursor.execute(
+                """
+                INSERT INTO payroll_entries
+                (officer_id, entry_date, entry_type, hours, night_differential_hours, calculated_pay,
+                 comp_bank_delta, sick_bank_delta, float_holiday_bank_delta, holiday_bank_delta, notes,
+                 pay_period_start)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    officer_id,
+                    entry_date,
+                    entry_type,
+                    hours,
+                    night_differential_hours,
+                    calc.total_pay,
+                    calc.comp_bank_delta,
+                    calc.sick_bank_delta,
+                    calc.float_holiday_bank_delta,
+                    calc.holiday_bank_delta,
+                    notes,
+                    pay_start.isoformat(),
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE officer_time_banks
+                SET comp_hours = comp_hours + ?,
+                    sick_hours = sick_hours + ?,
+                    float_holiday_hours = float_holiday_hours + ?,
+                    holiday_hours = holiday_hours + ?
+                WHERE officer_id = ?
+            """,
+                (
+                    calc.comp_bank_delta,
+                    calc.sick_bank_delta,
+                    calc.float_holiday_bank_delta,
+                    calc.holiday_bank_delta,
+                    officer_id,
+                ),
+            )
+            conn.commit()
+            return {
+                "success": True,
+                "entry_id": cursor.lastrowid,
+                "calculated_pay": calc.total_pay,
+                "breakdown": calc,
+            }
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def get_payroll_entries(
@@ -130,30 +128,29 @@ def get_payroll_entries(
     limit: int = 100,
     period_start: Optional[date] = None,
 ) -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    query = """
-        SELECT p.*, o.name AS officer_name
-        FROM payroll_entries p
-        JOIN officers o ON p.officer_id = o.id
-    """
-    conditions: List[str] = []
-    params: List = []
-    if officer_id:
-        conditions.append("p.officer_id = ?")
-        params.append(officer_id)
-    if period_start:
-        start, _ = get_pay_period(period_start)
-        conditions.append("p.pay_period_start = ?")
-        params.append(start.isoformat())
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY p.entry_date DESC, p.id DESC LIMIT ?"
-    params.append(limit)
-    cursor.execute(query, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    with connection() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT p.*, o.name AS officer_name
+            FROM payroll_entries p
+            JOIN officers o ON p.officer_id = o.id
+        """
+        conditions: List[str] = []
+        params: List = []
+        if officer_id:
+            conditions.append("p.officer_id = ?")
+            params.append(officer_id)
+        if period_start:
+            start, _ = get_pay_period(period_start)
+            conditions.append("p.pay_period_start = ?")
+            params.append(start.isoformat())
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY p.entry_date DESC, p.id DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows
 
 
 def get_pay_stub_preview(officer_id: int, period_start: Optional[date] = None) -> Dict:
@@ -170,20 +167,19 @@ def import_timecard_to_payroll(
     if is_pay_period_locked(start):
         return {"success": False, "message": "Pay period is locked — import disabled"}
     start_str = start.isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM timecard_entries
-        WHERE officer_id = ? AND pay_period_start = ?
-          AND payroll_entry_id IS NULL
-          AND entry_type != ?
-          AND hours_worked > 0
-    """,
-        (officer_id, start_str, TIMECARD_REGULAR_TYPE),
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM timecard_entries
+            WHERE officer_id = ? AND pay_period_start = ?
+              AND payroll_entry_id IS NULL
+              AND entry_type != ?
+              AND hours_worked > 0
+        """,
+            (officer_id, start_str, TIMECARD_REGULAR_TYPE),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
 
     if not rows:
         return {"success": False, "message": "No payable timecard rows to import"}
@@ -204,18 +200,17 @@ def import_timecard_to_payroll(
         if not result.get("success"):
             errors.append(f"{row['entry_date']}: {result.get('message')}")
             continue
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE timecard_entries
-            SET payroll_entry_id = ?, imported_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """,
-            (result["entry_id"], row["id"]),
-        )
-        conn.commit()
-        conn.close()
+        with connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE timecard_entries
+                SET payroll_entry_id = ?, imported_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """,
+                (result["entry_id"], row["id"]),
+            )
+            conn.commit()
         imported += 1
 
     if imported == 0:

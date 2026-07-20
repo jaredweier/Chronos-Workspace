@@ -13,7 +13,7 @@ from config import (
     NIGHT_MINIMUM_OFFICERS,
     is_high_risk_night,
 )
-from database import get_connection
+from database import connection
 from logic.staffing_config import get_active_shift_times
 from paths import data_path, ensure_data_dirs
 from validators import applies_night_minimum, format_date, format_row_dates, parse_date
@@ -229,42 +229,39 @@ def get_equitable_ot_ledger(period_start: Optional[date] = None) -> Dict:
     # CrewSense / Snap equity pattern — grievance defense
     offered_by: Dict[int, float] = {}
     try:
-        from database import get_connection
-
         start = sheets.get("period_start")
         end = sheets.get("period_end")
-        conn = get_connection()
-        cur = conn.cursor()
-        if start and end:
-            cur.execute(
-                """
-                SELECT filled_by_officer_id, COUNT(*) AS n
-                FROM open_shifts
-                WHERE status = 'filled'
-                  AND shift_date >= ? AND shift_date <= ?
-                  AND filled_by_officer_id IS NOT NULL
-                GROUP BY filled_by_officer_id
-                """,
-                (start, end),
-            )
-            for row in cur.fetchall():
-                # approximate 1 fill ≈ 1 opportunity unit (not clock hours)
-                offered_by[int(row[0])] = float(row[1] or 0) * 8.0
-            try:
+        with connection() as conn:
+            cur = conn.cursor()
+            if start and end:
                 cur.execute(
                     """
-                    SELECT officer_id, COUNT(*) FROM callback_events
-                    WHERE event_date >= ? AND event_date <= ?
-                    GROUP BY officer_id
+                    SELECT filled_by_officer_id, COUNT(*) AS n
+                    FROM open_shifts
+                    WHERE status = 'filled'
+                      AND shift_date >= ? AND shift_date <= ?
+                      AND filled_by_officer_id IS NOT NULL
+                    GROUP BY filled_by_officer_id
                     """,
                     (start, end),
                 )
                 for row in cur.fetchall():
-                    oid = int(row[0])
-                    offered_by[oid] = offered_by.get(oid, 0.0) + float(row[1] or 0) * 4.0
-            except Exception:
-                pass
-        conn.close()
+                    # approximate 1 fill ≈ 1 opportunity unit (not clock hours)
+                    offered_by[int(row[0])] = float(row[1] or 0) * 8.0
+                try:
+                    cur.execute(
+                        """
+                        SELECT officer_id, COUNT(*) FROM callback_events
+                        WHERE event_date >= ? AND event_date <= ?
+                        GROUP BY officer_id
+                        """,
+                        (start, end),
+                    )
+                    for row in cur.fetchall():
+                        oid = int(row[0])
+                        offered_by[oid] = offered_by.get(oid, 0.0) + float(row[1] or 0) * 4.0
+                except Exception:
+                    pass
     except Exception:
         offered_by = {}
 
@@ -323,19 +320,18 @@ def get_hours_watch(
     today = date.today()
     week_start = today - timedelta(days=today.weekday())
     week_end = week_start + timedelta(days=6)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT officer_id, SUM(hours_worked) AS week_hours
-        FROM timecard_entries
-        WHERE entry_date >= ? AND entry_date <= ?
-        GROUP BY officer_id
-    """,
-        (week_start.isoformat(), week_end.isoformat()),
-    )
-    week_hours_map = {row["officer_id"]: row["week_hours"] or 0.0 for row in cursor.fetchall()}
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT officer_id, SUM(hours_worked) AS week_hours
+            FROM timecard_entries
+            WHERE entry_date >= ? AND entry_date <= ?
+            GROUP BY officer_id
+        """,
+            (week_start.isoformat(), week_end.isoformat()),
+        )
+        week_hours_map = {row["officer_id"]: row["week_hours"] or 0.0 for row in cursor.fetchall()}
 
     # Dual workforce (Netchex): civilians use weekly 40h-style thresholds, not LE 7(k)
     try:
@@ -436,8 +432,6 @@ def get_schedule_conflicts(
     end_date: date,
     officer_id: Optional[int] = None,
 ) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT a.*, o.name AS officer_name, o.squad
         FROM officer_availability a
@@ -449,9 +443,10 @@ def get_schedule_conflicts(
         query += " AND a.officer_id = ?"
         params.append(officer_id)
     query += " ORDER BY a.unavailable_date, o.name"
-    cursor.execute(query, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
 
     from logic import batch_officer_day_status
 
@@ -484,31 +479,30 @@ def get_payroll_ytd(year: Optional[int] = None) -> Dict:
     yr = year or date.today().year
     start = f"{yr}-01-01"
     end = f"{yr}-12-31"
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT officer_id,
-               SUM(calculated_pay) AS total_pay,
-               SUM(hours) AS total_hours,
-               SUM(night_differential_hours) AS night_hours
-        FROM payroll_entries
-        WHERE entry_date >= ? AND entry_date <= ?
-        GROUP BY officer_id
-    """,
-        (start, end),
-    )
-    by_officer = {r["officer_id"]: dict(r) for r in cursor.fetchall()}
-    cursor.execute(
-        """
-        SELECT SUM(calculated_pay) AS dept_pay, SUM(hours) AS dept_hours
-        FROM payroll_entries
-        WHERE entry_date >= ? AND entry_date <= ?
-    """,
-        (start, end),
-    )
-    totals = dict(cursor.fetchone() or {})
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT officer_id,
+                   SUM(calculated_pay) AS total_pay,
+                   SUM(hours) AS total_hours,
+                   SUM(night_differential_hours) AS night_hours
+            FROM payroll_entries
+            WHERE entry_date >= ? AND entry_date <= ?
+            GROUP BY officer_id
+        """,
+            (start, end),
+        )
+        by_officer = {r["officer_id"]: dict(r) for r in cursor.fetchall()}
+        cursor.execute(
+            """
+            SELECT SUM(calculated_pay) AS dept_pay, SUM(hours) AS dept_hours
+            FROM payroll_entries
+            WHERE entry_date >= ? AND entry_date <= ?
+        """,
+            (start, end),
+        )
+        totals = dict(cursor.fetchone() or {})
 
     officers = get_officers_by_seniority()
     rows = []
@@ -651,8 +645,6 @@ def export_payroll_csv(
         suffix = f"_{officer_id}" if officer_id else ""
         output_path = data_path(f"exports/payroll_{format_date(start)}_{format_date(end)}{suffix}.csv")
 
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT p.*, o.name AS officer_name, o.squad
         FROM payroll_entries p
@@ -664,9 +656,10 @@ def export_payroll_csv(
         query += " AND p.officer_id = ?"
         params.append(officer_id)
     query += " ORDER BY p.entry_date, o.name"
-    cursor.execute(query, tuple(params))
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, tuple(params))
+        rows = [dict(r) for r in cursor.fetchall()]
 
     if not rows:
         return {"success": False, "message": "No payroll entries in period"}
@@ -859,8 +852,6 @@ def export_timecard_csv(
         suffix = f"_{officer_id}" if officer_id else ""
         output_path = data_path(f"exports/timecard_{format_date(start)}_{format_date(end)}{suffix}.csv")
 
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT t.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
         FROM timecard_entries t
@@ -872,9 +863,10 @@ def export_timecard_csv(
         query += " AND t.officer_id = ?"
         params.append(officer_id)
     query += " ORDER BY o.name, t.entry_date"
-    cursor.execute(query, tuple(params))
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, tuple(params))
+        rows = [dict(r) for r in cursor.fetchall()]
 
     if not rows:
         return {"success": False, "message": "No timecard entries in period"}
@@ -1146,16 +1138,15 @@ def export_schedule_diff_csv(
 def _upcoming_holidays(days_ahead: int = 60) -> List[Dict]:
     today = date.today()
     end = today + timedelta(days=days_ahead)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM holidays
-        WHERE holiday_date >= ? AND holiday_date <= ?
-        ORDER BY holiday_date
-    """,
-        (today.isoformat(), end.isoformat()),
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM holidays
+            WHERE holiday_date >= ? AND holiday_date <= ?
+            ORDER BY holiday_date
+        """,
+            (today.isoformat(), end.isoformat()),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
     return rows

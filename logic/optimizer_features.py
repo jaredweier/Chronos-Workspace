@@ -627,13 +627,14 @@ def early_impossible_proof(
     from logic.rotation_patterns import build_pattern, projected_annual_hours
 
     vars_ = [v for v in (rotation_variations or []) if (v or "").strip()]
-    if not vars_ or not annual_hours_hard:
-        # Still check headcount vs 24/7 + windows when possible
+
+    if not vars_:
         if coverage_247 > 0 and int(num_officers) < int(coverage_247):
             return f"officers ({num_officers}) < 24/7 minimum ({coverage_247})"
         if window_min > 0 and int(num_officers) < int(window_min):
             return f"officers ({num_officers}) < window minimum ({window_min})"
         return None
+
     try:
         patterns = [
             build_pattern(
@@ -644,23 +645,36 @@ def early_impossible_proof(
         ]
     except ValueError as exc:
         return f"invalid multi-block pattern: {exc}"
-    # Mean annual across mixed patterns (assume balanced map)
-    hours = [
-        projected_annual_hours(patterns[i % len(patterns)], float(shift_length_hours))
-        for i in range(max(1, int(num_officers)))
-    ]
-    avg = sum(hours) / len(hours)
-    # B5 fix: only apply 2% floor when variance truly unset (same fix as B4 in cheap_reject)
-    if float(annual_hours_variance or 0) > 0:
-        band = float(annual_hours_variance)
-    else:
-        band = abs(float(annual_hours_target)) * 0.02
-    if abs(avg - float(annual_hours_target)) > band + 1.0:
-        return f"pattern mean annual ~{avg:.0f}h outside {annual_hours_target:g}±{annual_hours_variance:g}"
-    if coverage_247 > 0 and int(num_officers) < int(coverage_247):
-        return f"officers ({num_officers}) < 24/7 minimum ({coverage_247})"
-    if window_min > 0 and int(num_officers) < int(window_min):
-        return f"officers ({num_officers}) < window minimum ({window_min})"
+
+    # Verify coverage bounds based on rotation math
+    work_fracs = [p.work_days_per_cycle() / max(1, p.cycle_length) for p in patterns]
+    avg_work_frac = sum(work_fracs) / max(1, len(work_fracs))
+    max_daily_staffing = int(num_officers * avg_work_frac)
+
+    if coverage_247 > 0:
+        import math
+
+        shifts_needed = math.ceil(24.0 / float(shift_length_hours))
+        working_needed = shifts_needed * int(coverage_247)
+        if max_daily_staffing < working_needed:
+            return f"rotation supports max {max_daily_staffing} working/day, but 24/7 requires {working_needed} (for {shifts_needed} shifts)"
+
+    if window_min > 0 and max_daily_staffing < int(window_min):
+        return f"rotation supports max {max_daily_staffing} working/day, but window minimum is {window_min}"
+
+    if annual_hours_hard:
+        hours = [
+            projected_annual_hours(patterns[i % len(patterns)], float(shift_length_hours))
+            for i in range(max(1, int(num_officers)))
+        ]
+        avg = sum(hours) / max(1, len(hours))
+        if float(annual_hours_variance or 0) > 0:
+            band = float(annual_hours_variance)
+        else:
+            band = abs(float(annual_hours_target)) * 0.02
+        if abs(avg - float(annual_hours_target)) > band + 1.0:
+            return f"pattern mean annual ~{avg:.0f}h outside {annual_hours_target:g}±{annual_hours_variance:g}"
+
     return None
 
 
@@ -1572,7 +1586,6 @@ def suggest_relaxations(
     if r.get("success") and (r.get("best") or {}).get("hard_constraints_ok"):
         return []  # Already passing
 
-    hist = r.get("failure_histogram") or {}
     near = r.get("near_misses") or []
     best_miss = r.get("best") if not (r.get("best") or {}).get("hard_constraints_ok") else None
     if not best_miss and near:

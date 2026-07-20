@@ -465,6 +465,21 @@ def run(argv: list[str] | None = None) -> None:
     do_reload = bool(args.reload) and not uat_stable
     # Slightly slower binding pull reduces WebSocket chatter under tunnels
     bind_iv = float(os.environ.get("SCHEDULER_BINDING_INTERVAL", "0.25") or "0.25")
+
+    # The simulator page (large ranked-option lists, coverage-by-day grids,
+    # heatmap matrices) can push a single reactive update past python-socketio's
+    # 1 MB default Engine.IO frame size, which the client reports as "Message
+    # too long" and forces a disconnect/reconnect loop. Raise the ceiling
+    # before starting the server.
+    try:
+        from nicegui import core as _nicegui_core
+
+        _nicegui_core.sio.eio.max_http_buffer_size = int(
+            os.environ.get("SCHEDULER_WS_MAX_BUFFER_BYTES", "10000000") or "10000000"
+        )
+    except Exception:
+        pass
+
     ui.run(
         title=title,
         host=host,

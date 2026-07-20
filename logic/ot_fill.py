@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from database import get_connection
+from database import connection
 from logic.operations import get_department_setting, set_department_setting
 from logic.users import log_audit_action
 from validators import parse_date, storage_date_str
@@ -353,38 +353,36 @@ def record_ot_fill_event(
                 "year_stats": stats,
             }
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO ot_fill_events
-            (officer_id, event_year, event_date, event_type, fill_mode, request_id,
-             hours, is_partial, is_ordered, covered_shift_start, notes, created_by_user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                officer_id,
-                year,
-                event_date,
-                event_type,
-                fill_mode or get_ot_fill_mode(),
-                request_id,
-                float(hours or 0),
-                1 if is_partial else 0,
-                1 if is_ordered else 0,
-                covered_shift_start,
-                notes or None,
-                user_id,
-            ),
-        )
-        eid = cursor.lastrowid
-        conn.commit()
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO ot_fill_events
+                (officer_id, event_year, event_date, event_type, fill_mode, request_id,
+                 hours, is_partial, is_ordered, covered_shift_start, notes, created_by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    officer_id,
+                    year,
+                    event_date,
+                    event_type,
+                    fill_mode or get_ot_fill_mode(),
+                    request_id,
+                    float(hours or 0),
+                    1 if is_partial else 0,
+                    1 if is_ordered else 0,
+                    covered_shift_start,
+                    notes or None,
+                    user_id,
+                ),
+            )
+            eid = cursor.lastrowid
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            return {"success": False, "message": str(exc)}
 
     call_list_msg = ""
     if update_call_list and event_type == EVENT_ORDERED_IN:
@@ -504,54 +502,53 @@ def move_officer_to_end_of_call_list(officer_id: int, *, user_id: Optional[int] 
 
 
 def _move_callback_rotation_to_end(officer_id: int, *, user_id: Optional[int] = None) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT officer_id, sort_order FROM callback_rotation WHERE active = 1 ORDER BY sort_order ASC")
-        rows = cursor.fetchall()
-        if not rows:
-            return {"success": True, "message": "No callback_rotation rows"}
-        ids = [int(r["officer_id"]) for r in rows]
-        if officer_id not in ids:
-            cursor.execute("SELECT MAX(sort_order) FROM callback_rotation")
-            mx = cursor.fetchone()[0] or 0
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
             cursor.execute(
-                "INSERT INTO callback_rotation (officer_id, sort_order, active) VALUES (?, ?, 1)",
-                (officer_id, mx + 1),
+                "SELECT officer_id, sort_order FROM callback_rotation WHERE active = 1 ORDER BY sort_order ASC"
             )
-        else:
-            ids = [i for i in ids if i != officer_id] + [officer_id]
-            for order, oid in enumerate(ids):
+            rows = cursor.fetchall()
+            if not rows:
+                return {"success": True, "message": "No callback_rotation rows"}
+            ids = [int(r["officer_id"]) for r in rows]
+            if officer_id not in ids:
+                cursor.execute("SELECT MAX(sort_order) FROM callback_rotation")
+                mx = cursor.fetchone()[0] or 0
                 cursor.execute(
-                    "UPDATE callback_rotation SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE officer_id = ?",
-                    (order, oid),
+                    "INSERT INTO callback_rotation (officer_id, sort_order, active) VALUES (?, ?, 1)",
+                    (officer_id, mx + 1),
                 )
-        conn.commit()
-        return {"success": True, "message": "callback_rotation updated"}
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+            else:
+                ids = [i for i in ids if i != officer_id] + [officer_id]
+                for order, oid in enumerate(ids):
+                    cursor.execute(
+                        "UPDATE callback_rotation SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE officer_id = ?",
+                        (order, oid),
+                    )
+            conn.commit()
+            return {"success": True, "message": "callback_rotation updated"}
+        except Exception as exc:
+            conn.rollback()
+            return {"success": False, "message": str(exc)}
 
 
 def get_officer_ot_fill_year_stats(officer_id: int, year: Optional[int] = None) -> Dict:
     if year is None:
         year = date.today().year
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT event_type, COUNT(*) AS n,
-               SUM(CASE WHEN is_ordered = 1 THEN 1 ELSE 0 END) AS ordered_flags
-        FROM ot_fill_events
-        WHERE officer_id = ? AND event_year = ?
-        GROUP BY event_type
-        """,
-        (officer_id, year),
-    )
-    by_type = {r["event_type"]: int(r["n"]) for r in cursor.fetchall()}
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT event_type, COUNT(*) AS n,
+                   SUM(CASE WHEN is_ordered = 1 THEN 1 ELSE 0 END) AS ordered_flags
+            FROM ot_fill_events
+            WHERE officer_id = ? AND event_year = ?
+            GROUP BY event_type
+            """,
+            (officer_id, year),
+        )
+        by_type = {r["event_type"]: int(r["n"]) for r in cursor.fetchall()}
     return {
         "officer_id": officer_id,
         "year": year,
@@ -566,25 +563,24 @@ def get_officer_ot_fill_year_stats(officer_id: int, year: Optional[int] = None) 
 def get_ot_fill_year_leaderboard(year: Optional[int] = None, *, limit: int = 50) -> Dict:
     if year is None:
         year = date.today().year
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT e.officer_id, o.name,
-               SUM(CASE WHEN e.event_type = 'ordered_in' THEN 1 ELSE 0 END) AS ordered_in,
-               SUM(CASE WHEN e.event_type = 'turned_down' THEN 1 ELSE 0 END) AS turned_down,
-               SUM(CASE WHEN e.event_type = 'volunteered' THEN 1 ELSE 0 END) AS volunteered
-        FROM ot_fill_events e
-        JOIN officers o ON o.id = e.officer_id
-        WHERE e.event_year = ?
-        GROUP BY e.officer_id
-        ORDER BY ordered_in DESC, turned_down DESC
-        LIMIT ?
-        """,
-        (year, limit),
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT e.officer_id, o.name,
+                   SUM(CASE WHEN e.event_type = 'ordered_in' THEN 1 ELSE 0 END) AS ordered_in,
+                   SUM(CASE WHEN e.event_type = 'turned_down' THEN 1 ELSE 0 END) AS turned_down,
+                   SUM(CASE WHEN e.event_type = 'volunteered' THEN 1 ELSE 0 END) AS volunteered
+            FROM ot_fill_events e
+            JOIN officers o ON o.id = e.officer_id
+            WHERE e.event_year = ?
+            GROUP BY e.officer_id
+            ORDER BY ordered_in DESC, turned_down DESC
+            LIMIT ?
+            """,
+            (year, limit),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
     return {"success": True, "year": year, "rows": rows}
 
 
@@ -603,23 +599,21 @@ def apply_ot_fill_selection(
     Record turn-downs, record cover response, approve day-off with preferred chain
     cover_officer → original.
     """
-    from database import get_connection
     from logic.officers import get_officer_by_id
     from logic.requests import process_day_off_request
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT r.*, o.squad, o.shift_start, o.shift_end, o.name AS officer_name
-        FROM day_off_requests r
-        JOIN officers o ON o.id = r.officer_id
-        WHERE r.id = ?
-        """,
-        (request_id,),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT r.*, o.squad, o.shift_start, o.shift_end, o.name AS officer_name
+            FROM day_off_requests r
+            JOIN officers o ON o.id = r.officer_id
+            WHERE r.id = ?
+            """,
+            (request_id,),
+        )
+        row = cursor.fetchone()
     if not row:
         return {"success": False, "message": "Request not found"}
     request = dict(row)

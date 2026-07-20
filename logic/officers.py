@@ -5,7 +5,7 @@ import os
 from datetime import date
 from typing import Dict, List, Optional
 
-from database import get_connection
+from database import connection
 from validators import (
     normalize_optional_text,
     parse_date,
@@ -16,40 +16,37 @@ from validators import (
 
 def get_officers_by_seniority() -> List[Dict]:
     """Roster list sorted by seniority rank (ascending) for UI display and vacation grant ordering."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT *
-        FROM officers
-        ORDER BY seniority_rank ASC, name ASC
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT *
+            FROM officers
+            ORDER BY seniority_rank ASC, name ASC
+        """)
+        rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
 
 def get_officer_by_id(officer_id: int) -> Optional[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM officers WHERE id = ?", (officer_id,))
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM officers WHERE id = ?", (officer_id,))
+        row = cursor.fetchone()
     return dict(row) if row else None
 
 
 def get_supervisors() -> List[Dict]:
     """Officers linked to active Supervisor or Administration app users."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT o.* FROM officers o
-        JOIN app_users u ON u.officer_id = o.id
-        WHERE o.active = 1 AND u.active = 1
-          AND u.role IN ('Supervisor', 'Administration')
-        ORDER BY o.name ASC
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT o.* FROM officers o
+            JOIN app_users u ON u.officer_id = o.id
+            WHERE o.active = 1 AND u.active = 1
+              AND u.role IN ('Supervisor', 'Administration')
+            ORDER BY o.name ASC
+        """)
+        rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
 
@@ -63,16 +60,15 @@ def get_suggested_seniority_rank() -> int:
 
 def get_request_reviewer_officer_ids() -> List[int]:
     """Officer IDs for active Supervisor/Administration app users (notification targets)."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT DISTINCT officer_id FROM app_users
-        WHERE active = 1
-          AND role IN ('Supervisor', 'Administration')
-          AND officer_id IS NOT NULL
-    """)
-    ids = [row[0] for row in cursor.fetchall() if row[0]]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT officer_id FROM app_users
+            WHERE active = 1
+              AND role IN ('Supervisor', 'Administration')
+              AND officer_id IS NOT NULL
+        """)
+        ids = [row[0] for row in cursor.fetchall() if row[0]]
     if ids:
         return ids
     return [officer["id"] for officer in get_supervisors()]
@@ -181,41 +177,39 @@ def add_officer(
     if start_date:
         start_date = storage_date_str(start_date)
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO officers
-            (name, seniority_rank, squad, shift_start, shift_end, pay_rate,
-             night_differential_rate, start_date, email, phone, address,
-             job_title, annual_hours_target, overtime_multiplier)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                name.strip(),
-                seniority_rank,
-                squad,
-                shift_start,
-                shift_end,
-                pay_rate,
-                night_differential_rate,
-                start_date,
-                email,
-                phone,
-                address,
-                job_title,
-                annual_hours_target,
-                overtime_multiplier,
-            ),
-        )
-        conn.commit()
-        return {"success": True, "officer_id": cursor.lastrowid}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO officers
+                (name, seniority_rank, squad, shift_start, shift_end, pay_rate,
+                 night_differential_rate, start_date, email, phone, address,
+                 job_title, annual_hours_target, overtime_multiplier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    name.strip(),
+                    seniority_rank,
+                    squad,
+                    shift_start,
+                    shift_end,
+                    pay_rate,
+                    night_differential_rate,
+                    start_date,
+                    email,
+                    phone,
+                    address,
+                    job_title,
+                    annual_hours_target,
+                    overtime_multiplier,
+                ),
+            )
+            conn.commit()
+            return {"success": True, "officer_id": cursor.lastrowid}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def update_officer(officer_id: int, **fields) -> Dict:
@@ -316,19 +310,17 @@ def update_officer(officer_id: int, **fields) -> Dict:
     columns = ", ".join(f"{key} = ?" for key in updates)
     values = list(updates.values()) + [officer_id]
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(f"UPDATE officers SET {columns} WHERE id = ?", values)
-        conn.commit()
-        if cursor.rowcount == 0:
-            return {"success": False, "message": "Officer not found"}
-        return {"success": True}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"UPDATE officers SET {columns} WHERE id = ?", values)
+            conn.commit()
+            if cursor.rowcount == 0:
+                return {"success": False, "message": "Officer not found"}
+            return {"success": True}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def delete_officer(officer_id: int) -> Dict:
@@ -338,31 +330,29 @@ def delete_officer(officer_id: int) -> Dict:
     if not officer:
         return {"success": False, "message": "Officer not found"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        history = _officer_history_reason(cursor, officer_id)
-        if history:
-            return {
-                "success": False,
-                "message": (
-                    f"Cannot delete officer with existing {history}. Deactivate instead to keep scheduling history."
-                ),
-            }
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            history = _officer_history_reason(cursor, officer_id)
+            if history:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Cannot delete officer with existing {history}. Deactivate instead to keep scheduling history."
+                    ),
+                }
 
-        remove_officer_photo(officer_id)
-        cursor.execute("DELETE FROM officer_time_banks WHERE officer_id = ?", (officer_id,))
-        cursor.execute("DELETE FROM officers WHERE id = ?", (officer_id,))
-        deleted = cursor.rowcount
-        conn.commit()
-        if deleted == 0:
-            return {"success": False, "message": "Officer not found"}
-        return {"success": True, "message": f"Officer '{officer['name']}' deleted"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            remove_officer_photo(officer_id)
+            cursor.execute("DELETE FROM officer_time_banks WHERE officer_id = ?", (officer_id,))
+            cursor.execute("DELETE FROM officers WHERE id = ?", (officer_id,))
+            deleted = cursor.rowcount
+            conn.commit()
+            if deleted == 0:
+                return {"success": False, "message": "Officer not found"}
+            return {"success": True, "message": f"Officer '{officer['name']}' deleted"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def import_roster_from_csv(file_path: str, update_existing: bool = True) -> Dict:

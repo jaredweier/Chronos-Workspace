@@ -703,3 +703,162 @@ def recommend_pay_period_preview(start_date: str = "") -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"success": False, "message": str(exc)}
+
+
+def absence_stress_test(
+    row: Dict[str, Any],
+    constraints: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Re-evaluate a winning option with one officer out.
+
+    Schedules die on vacation/sick/training, not on paper — this answers
+    "does this plan survive 1 officer out?" by re-running the same shape
+    (pattern, length, starts, requirements) at N-1 officers.
+
+    Returns {survives_one_out, n_tested, message, shortfalls:{...}}.
+    """
+    from logic.scheduling_sim import run_schedule_simulation
+
+    r = dict(row or {})
+    c = dict(constraints or {})
+    n = int(r.get("num_officers") or 0)
+    if n <= 1:
+        return {
+            "success": False,
+            "survives_one_out": False,
+            "n_tested": max(n - 1, 0),
+            "message": "Not enough officers to test an absence.",
+        }
+    starts = list(r.get("shift_starts") or r.get("best_starts") or [])
+    length = float(r.get("shift_length_hours") or 8.0)
+    try:
+        sim = run_schedule_simulation(
+            rotation_type=str(r.get("rotation_type") or ""),
+            num_officers=n - 1,
+            shift_length_hours=length,
+            annual_hours_target=float(c.get("annual_hours_target") or 0.0),
+            shift_starts=starts,
+            min_per_shift=int(c.get("min_per_shift") or 1),
+            simulation_days=int(c.get("simulation_days") or 56),
+            annual_hours_variance=float(c.get("annual_hours_variance") or 40.0),
+            annual_hours_hard=False,
+            coverage_247=int(c.get("coverage_247") or 0),
+            rotation_style=str(r.get("rotation_style") or c.get("rotation_style") or ""),
+            rotation_variations=list(r.get("rotation_variations") or c.get("rotation_variations") or []),
+            auto_min_officers=False,
+            use_extra_windows=bool(c.get("use_extra_windows")),
+            extra_windows=list(c.get("extra_windows") or []),
+            nearby_start_hops=int(c.get("nearby_start_hops") or 0),
+            allow_offday_coverage=bool(c.get("allow_offday_coverage")),
+        )
+    except Exception as exc:
+        return {"success": False, "survives_one_out": False, "n_tested": n - 1, "message": str(exc)}
+    m = sim.get("metrics") or {}
+    gaps = int(m.get("gap_events") or 0)
+    c247 = int(m.get("coverage_247_failures") or 0)
+    wins = int(m.get("extra_window_failures") or 0)
+    survives = bool(sim.get("success")) and gaps == 0 and c247 == 0 and wins == 0
+    if survives:
+        msg = f"Survives 1 out: coverage holds at {n - 1} officers."
+    else:
+        parts = []
+        if gaps:
+            parts.append(f"{gaps} coverage gap(s)")
+        if c247:
+            parts.append(f"{c247} 24/7 shortfall(s)")
+        if wins:
+            parts.append(f"{wins} window shortfall(s)")
+        msg = f"At {n - 1} officers: " + (", ".join(parts) if parts else "simulation failed") + "."
+    return {
+        "success": True,
+        "survives_one_out": survives,
+        "n_tested": n - 1,
+        "message": msg,
+        "shortfalls": {"gap_events": gaps, "coverage_247_failures": c247, "extra_window_failures": wins},
+    }
+
+
+def option_fatigue_score(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Fatigue / quality-of-life score (0-100, higher = better) for a ranked option.
+
+    Scored from the schedule shape itself: consecutive-work runs, night-shift
+    load, shift length, and weekend distribution — the questions a union asks
+    on day one. Flags list each penalty applied.
+    """
+    from config import MAX_CONSECUTIVE_WORK_DAYS
+
+    r = dict(row or {})
+    score = 100.0
+    flags: List[str] = []
+    length = float(r.get("shift_length_hours") or 8.0)
+    variations = [v.strip() for v in (r.get("rotation_variations") or []) if str(v).strip()]
+
+    # Longest consecutive-ON run across multi-block variations like "6-2,5-3"
+    longest_run = 0
+    for var in variations:
+        for block in str(var).replace("|", ",").split(","):
+            b = block.strip()
+            if "-" in b:
+                on = b.split("-", 1)[0].strip()
+                if on.isdigit():
+                    longest_run = max(longest_run, int(on))
+    if not longest_run:
+        rot = str(r.get("rotation_type") or "")
+        head = rot.split("-", 1)[0].strip() if "-" in rot else ""
+        if head.isdigit():
+            longest_run = int(head)
+    cap = int(MAX_CONSECUTIVE_WORK_DAYS or 13)
+    if longest_run >= cap:
+        score -= 35
+        flags.append(f"{longest_run} consecutive work days meets/exceeds policy cap {cap}")
+    elif longest_run >= 7:
+        score -= 20
+        flags.append(f"{longest_run} consecutive work days (7+ is high fatigue)")
+    elif longest_run >= 6:
+        score -= 10
+        flags.append(f"{longest_run} consecutive work days")
+
+    # Long shifts compound fatigue
+    if length >= 12:
+        score -= 15
+        flags.append(f"{length:g}h shifts (12h+ raises fatigue risk)")
+    elif length >= 10.5:
+        score -= 8
+        flags.append(f"{length:g}h shifts")
+
+    # Night starts (19:00-03:59 starts count as night duty)
+    starts = [str(s) for s in (r.get("shift_starts") or r.get("best_starts") or [])]
+    night_starts = 0
+    for s in starts:
+        try:
+            hh = int(s.split(":", 1)[0])
+        except (ValueError, AttributeError):
+            continue
+        if hh >= 19 or hh < 4:
+            night_starts += 1
+    if starts and night_starts:
+        frac = night_starts / len(starts)
+        if frac >= 0.5:
+            score -= 12
+            flags.append("half or more of start bands are nights")
+        else:
+            score -= 5
+            flags.append(f"{night_starts} night start band(s)")
+
+    # Off-day recovery: shortest OFF block across variations
+    shortest_off = None
+    for var in variations:
+        for block in str(var).replace("|", ",").split(","):
+            b = block.strip()
+            if "-" in b:
+                off = b.split("-", 1)[1].strip()
+                if off.isdigit():
+                    off_n = int(off)
+                    shortest_off = off_n if shortest_off is None else min(shortest_off, off_n)
+    if shortest_off is not None and shortest_off < 2:
+        score -= 10
+        flags.append("single-day recovery between blocks")
+
+    score = max(0.0, round(score, 1))
+    band = "low" if score >= 75 else ("moderate" if score >= 50 else "high")
+    return {"success": True, "score": score, "risk_band": band, "flags": flags}

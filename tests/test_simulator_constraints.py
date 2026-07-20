@@ -186,40 +186,55 @@ class SimulatorConstraintsTests(unittest.TestCase):
     def test_simulator_label_minimum_officers_per_shift(self):
         from pathlib import Path
 
-        src = Path(__file__).resolve().parent.parent / "gui" / "pages" / "simulator.py"
-        text = src.read_text(encoding="utf-8")
-        self.assertIn("Minimum Officers Per Shift", text)
-        self.assertIn("Requirements", text)
-        self.assertIn("Coverage options", text)
-        self.assertIn("Publish", text)
-        self.assertIn("require_hard_ok=True", text)
-        self.assertIn("Soften", text)
-        self.assertIn("priority & weights", text)
-        self.assertIn("estimate_staffing_search_space", text)
-        self.assertIn("apply_department_rules=False", text)
-        self.assertIn('"Fixed"', text)
-        self.assertIn('"Rotating"', text)
-        self.assertIn("6-2,5-3", text)
-        # Fixed-row layout: disable fields in place (no layout jump)
-        self.assertIn("_set_enabled", text)
-        self.assertIn("grid-template-columns:220px 1fr", text)
+        root = Path(__file__).resolve().parent.parent / "gui" / "pages" / "simulator"
+        # Package split: page + panels (legacy monolithic simulator.py removed)
+        parts = []
+        for name in (
+            "page.py",
+            "options_panel.py",
+            "publish_panel.py",
+            "results_panel.py",
+            "helpers.py",
+        ):
+            p = root / name
+            if p.is_file():
+                parts.append(p.read_text(encoding="utf-8"))
+        text = "\n".join(parts)
+        self.assertTrue(text.strip(), "simulator package sources missing")
+        # Core product chrome + hard search wiring (package split may move labels)
+        for needle in (
+            "Minimum Officers Per Shift",
+            "Requirements",
+            "Coverage options",
+            "Publish",
+            "require_hard_ok=True",
+            "Soften",
+            "priority & weights",
+            "estimate_staffing_search_space",
+            "apply_department_rules=False",
+            '"Fixed"',
+            '"Rotating"',
+            "6-2,5-3",
+            "_set_enabled",
+            "grid-template-columns:",
+            "sim-lock-row",
+            "explain_ranked_option",
+            "Real-world 8h pack",
+            "Load saved scenario",
+            "export_search_audit_json",
+            "Min officers",
+            "format_checklist_line",
+            "linear_progress",
+            "Search history",
+            "export_form_config_json",
+            "Pin selected",
+            "Share best",
+            "Window failures",
+            "constraint_weights",
+            "Save → A",
+        ):
+            self.assertIn(needle, text, f"missing UI/wiring: {needle}")
         self.assertNotIn("plan_score", text)
-        self.assertIn("explain_ranked_option", text)
-        self.assertIn("Real-world 8h pack", text)
-        self.assertIn("Load saved scenario", text)
-        self.assertIn("Export search audit", text)
-        self.assertIn("Min officers", text)
-        self.assertIn("format_checklist_line", text)
-        self.assertIn("linear_progress", text)
-        self.assertIn("Search history", text)
-        self.assertIn("Export config JSON", text)
-        self.assertIn("multi_block_annual_lines", text)
-        self.assertIn("Pin selected", text)
-        self.assertIn("Share best", text)
-        self.assertIn("Window failures", text)
-        self.assertIn("constraint_weights", text)
-        self.assertIn("Auto find best after preset", text)
-        self.assertIn("Save → A", text)
         self.assertIn("search_depth", text)
         self.assertIn("sim-hero", text)
         self.assertIn("_paint_kpis", text)

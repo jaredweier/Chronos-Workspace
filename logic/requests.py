@@ -5,7 +5,7 @@ Day-off requests, shift swaps, and in-app notifications.
 from typing import Dict, List, Optional, Set, Tuple
 
 from config import REQUEST_STATUS, is_high_risk_night, logger
-from database import get_connection
+from database import connection
 from logic.officers import (
     describe_day_off_request,
     get_officer_by_id,
@@ -59,93 +59,91 @@ def validate_swap_feasibility(officer1_id: int, officer2_id: int, swap_date: str
             message="Officer not found",
         )
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT COUNT(*) FROM schedule_overrides
-        WHERE override_date = ?
-        AND (original_officer_id IN (?, ?) OR replacement_officer_id IN (?, ?))
-    """,
-        (date_key, officer1_id, officer2_id, officer1_id, officer2_id),
-    )
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        return SwapValidationResult(
-            success=False,
-            officer1_id=officer1_id,
-            officer2_id=officer2_id,
-            swap_date=req_date,
-            message="Double-booking conflict",
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM schedule_overrides
+            WHERE override_date = ?
+            AND (original_officer_id IN (?, ?) OR replacement_officer_id IN (?, ?))
+        """,
+            (date_key, officer1_id, officer2_id, officer1_id, officer2_id),
         )
-
-    if _rotation_only_status(officer1, req_date) != "working" or _rotation_only_status(officer2, req_date) != "working":
-        conn.close()
-        return SwapValidationResult(
-            success=False,
-            officer1_id=officer1_id,
-            officer2_id=officer2_id,
-            swap_date=req_date,
-            message="One or both officers not scheduled to work",
-        )
-
-    if is_high_risk_night(req_date):
-        date_str = req_date.strftime("%Y-%m-%d")
-        coverage = get_shift_coverage_counts_for_range(req_date, req_date)
-        c1 = coverage.get((date_str, officer1["squad"], officer1["shift_start"]), 0)
-        c2 = coverage.get((date_str, officer2["squad"], officer2["shift_start"]), 0)
-        night1 = applies_night_minimum(req_date, officer1["shift_start"], is_high_risk_night)
-        night2 = applies_night_minimum(req_date, officer2["shift_start"], is_high_risk_night)
-        if (night1 and night_minimum_violation(c1)) or (night2 and night_minimum_violation(c2)):
-            conn.close()
+        if cursor.fetchone()[0] > 0:
             return SwapValidationResult(
                 success=False,
                 officer1_id=officer1_id,
                 officer2_id=officer2_id,
                 swap_date=req_date,
-                message="Night coverage violation",
+                message="Double-booking conflict",
+            )
+
+        if (
+            _rotation_only_status(officer1, req_date) != "working"
+            or _rotation_only_status(officer2, req_date) != "working"
+        ):
+            return SwapValidationResult(
+                success=False,
+                officer1_id=officer1_id,
+                officer2_id=officer2_id,
+                swap_date=req_date,
+                message="One or both officers not scheduled to work",
+            )
+
+        if is_high_risk_night(req_date):
+            date_str = req_date.strftime("%Y-%m-%d")
+            coverage = get_shift_coverage_counts_for_range(req_date, req_date)
+            c1 = coverage.get((date_str, officer1["squad"], officer1["shift_start"]), 0)
+            c2 = coverage.get((date_str, officer2["squad"], officer2["shift_start"]), 0)
+            night1 = applies_night_minimum(req_date, officer1["shift_start"], is_high_risk_night)
+            night2 = applies_night_minimum(req_date, officer2["shift_start"], is_high_risk_night)
+            if (night1 and night_minimum_violation(c1)) or (night2 and night_minimum_violation(c2)):
+                return SwapValidationResult(
+                    success=False,
+                    officer1_id=officer1_id,
+                    officer2_id=officer2_id,
+                    swap_date=req_date,
+                    message="Night coverage violation",
+                    requires_manual=True,
+                )
+
+        from config import MIN_REST_HOURS_BETWEEN_SHIFTS
+
+        rest_violations = []
+        if not officer_meets_minimum_rest(
+            officer1_id,
+            req_date,
+            officer2["shift_start"],
+            officer2["shift_end"],
+        ):
+            rest_violations.append(officer1["name"])
+        if not officer_meets_minimum_rest(
+            officer2_id,
+            req_date,
+            officer1["shift_start"],
+            officer1["shift_end"],
+        ):
+            rest_violations.append(officer2["name"])
+        if rest_violations:
+            return SwapValidationResult(
+                success=False,
+                officer1_id=officer1_id,
+                officer2_id=officer2_id,
+                swap_date=req_date,
+                message=(
+                    f"Minimum rest violation: {', '.join(rest_violations)} "
+                    f"(minimum {MIN_REST_HOURS_BETWEEN_SHIFTS:.0f}h) — supervisor override required"
+                ),
                 requires_manual=True,
             )
 
-    from config import MIN_REST_HOURS_BETWEEN_SHIFTS
-
-    rest_violations = []
-    if not officer_meets_minimum_rest(
-        officer1_id,
-        req_date,
-        officer2["shift_start"],
-        officer2["shift_end"],
-    ):
-        rest_violations.append(officer1["name"])
-    if not officer_meets_minimum_rest(
-        officer2_id,
-        req_date,
-        officer1["shift_start"],
-        officer1["shift_end"],
-    ):
-        rest_violations.append(officer2["name"])
-    if rest_violations:
-        conn.close()
         return SwapValidationResult(
-            success=False,
+            success=True,
             officer1_id=officer1_id,
             officer2_id=officer2_id,
             swap_date=req_date,
-            message=(
-                f"Minimum rest violation: {', '.join(rest_violations)} "
-                f"(minimum {MIN_REST_HOURS_BETWEEN_SHIFTS:.0f}h) — supervisor override required"
-            ),
-            requires_manual=True,
+            can_proceed=True,
         )
-
-    conn.close()
-    return SwapValidationResult(
-        success=True,
-        officer1_id=officer1_id,
-        officer2_id=officer2_id,
-        swap_date=req_date,
-        can_proceed=True,
-    )
 
 
 def create_shift_swap_request(officer1_id: int, officer2_id: int, swap_date: str) -> Dict:
@@ -159,138 +157,140 @@ def create_shift_swap_request(officer1_id: int, officer2_id: int, swap_date: str
         }
 
     status = "Pending Manual Review" if validation.requires_manual else "Pending"
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO shift_swaps (swap_date, officer1_id, officer2_id, status, admin_notes)
-            VALUES (?, ?, ?, ?, ?)
-        """,
-            (swap_date, officer1_id, officer2_id, status, validation.message if validation.requires_manual else None),
-        )
-        swap_id = cursor.lastrowid
-        conn.commit()
-        officer1 = get_officer_by_id(officer1_id)
-        officer2 = get_officer_by_id(officer2_id)
-        if officer1 and officer2:
-            _notify_shift_swap_submitted(swap_id, officer1, officer2, swap_date, status)
-        return {
-            "success": True,
-            "swap_id": swap_id,
-            "status": status,
-            "requires_manual": validation.requires_manual,
-        }
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO shift_swaps (swap_date, officer1_id, officer2_id, status, admin_notes)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (
+                    swap_date,
+                    officer1_id,
+                    officer2_id,
+                    status,
+                    validation.message if validation.requires_manual else None,
+                ),
+            )
+            swap_id = cursor.lastrowid
+            conn.commit()
+            officer1 = get_officer_by_id(officer1_id)
+            officer2 = get_officer_by_id(officer2_id)
+            if officer1 and officer2:
+                _notify_shift_swap_submitted(swap_id, officer1, officer2, swap_date, status)
+            return {
+                "success": True,
+                "swap_id": swap_id,
+                "status": status,
+                "requires_manual": validation.requires_manual,
+            }
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def process_shift_swap(swap_id: int, action: str = "approve", admin_notes: str = "") -> ProcessSwapResult:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT * FROM shift_swaps WHERE id = ?", (swap_id,))
-        swap = cursor.fetchone()
-        if not swap:
-            return ProcessSwapResult(success=False, message="Swap request not found")
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT * FROM shift_swaps WHERE id = ?", (swap_id,))
+            swap = cursor.fetchone()
+            if not swap:
+                return ProcessSwapResult(success=False, message="Swap request not found")
 
-        swap = dict(swap)
-        precheck = validate_process_shift_swap(swap, action)
-        if not precheck.ok:
-            return ProcessSwapResult(success=False, message=precheck.message)
+            swap = dict(swap)
+            precheck = validate_process_shift_swap(swap, action)
+            if not precheck.ok:
+                return ProcessSwapResult(success=False, message=precheck.message)
 
-        officer1 = get_officer_by_id(swap["officer1_id"])
-        officer2 = get_officer_by_id(swap["officer2_id"])
-        if not officer1 or not officer2:
-            return ProcessSwapResult(success=False, message="Officer not found")
+            officer1 = get_officer_by_id(swap["officer1_id"])
+            officer2 = get_officer_by_id(swap["officer2_id"])
+            if not officer1 or not officer2:
+                return ProcessSwapResult(success=False, message="Officer not found")
 
-        if action == "reject":
+            if action == "reject":
+                cursor.execute(
+                    """
+                    UPDATE shift_swaps
+                    SET status = 'Rejected', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """,
+                    (admin_notes, swap_id),
+                )
+                conn.commit()
+                _notify_shift_swap_processed(swap_id, officer1, officer2, swap["swap_date"], "Rejected")
+                return ProcessSwapResult(success=True, status="Rejected", message="Swap rejected.")
+
+            if action != "approve":
+                return ProcessSwapResult(success=False, message=f"Unknown action: {action}")
+
+            manual_override = swap["status"] == "Pending Manual Review"
+            if not manual_override:
+                validation = validate_swap_feasibility(swap["officer1_id"], swap["officer2_id"], swap["swap_date"])
+                if validation.requires_manual or not validation.success:
+                    cursor.execute(
+                        """
+                        UPDATE shift_swaps
+                        SET status = 'Pending Manual Review', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """,
+                        (admin_notes or validation.message, swap_id),
+                    )
+                    conn.commit()
+                    _notify_supervisors(
+                        "shift_swap",
+                        "Swap Needs Review",
+                        f"Swap #{swap_id} on {format_date(swap['swap_date'])} requires manual review.",
+                        swap_id,
+                        "shift_swap",
+                    )
+                    return ProcessSwapResult(
+                        success=False,
+                        status="Pending Manual Review",
+                        message=validation.message,
+                        requires_manual=True,
+                    )
+
+            swap_date = swap["swap_date"]
+            _insert_override_record(
+                cursor,
+                swap_date,
+                officer1["id"],
+                officer2["id"],
+                "Shift Swap",
+                officer1["shift_start"],
+            )
+            _insert_override_record(
+                cursor,
+                swap_date,
+                officer2["id"],
+                officer1["id"],
+                "Shift Swap",
+                officer2["shift_start"],
+            )
             cursor.execute(
                 """
                 UPDATE shift_swaps
-                SET status = 'Rejected', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                SET status = 'Approved', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """,
                 (admin_notes, swap_id),
             )
             conn.commit()
-            _notify_shift_swap_processed(swap_id, officer1, officer2, swap["swap_date"], "Rejected")
-            return ProcessSwapResult(success=True, status="Rejected", message="Swap rejected.")
 
-        if action != "approve":
-            return ProcessSwapResult(success=False, message=f"Unknown action: {action}")
+            from logic.snapshots import apply_live_schedule_for_date
 
-        manual_override = swap["status"] == "Pending Manual Review"
-        if not manual_override:
-            validation = validate_swap_feasibility(swap["officer1_id"], swap["officer2_id"], swap["swap_date"])
-            if validation.requires_manual or not validation.success:
-                cursor.execute(
-                    """
-                    UPDATE shift_swaps
-                    SET status = 'Pending Manual Review', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """,
-                    (admin_notes or validation.message, swap_id),
-                )
-                conn.commit()
-                _notify_supervisors(
-                    "shift_swap",
-                    "Swap Needs Review",
-                    f"Swap #{swap_id} on {format_date(swap['swap_date'])} requires manual review.",
-                    swap_id,
-                    "shift_swap",
-                )
-                return ProcessSwapResult(
-                    success=False,
-                    status="Pending Manual Review",
-                    message=validation.message,
-                    requires_manual=True,
-                )
-
-        swap_date = swap["swap_date"]
-        _insert_override_record(
-            cursor,
-            swap_date,
-            officer1["id"],
-            officer2["id"],
-            "Shift Swap",
-            officer1["shift_start"],
-        )
-        _insert_override_record(
-            cursor,
-            swap_date,
-            officer2["id"],
-            officer1["id"],
-            "Shift Swap",
-            officer2["shift_start"],
-        )
-        cursor.execute(
-            """
-            UPDATE shift_swaps
-            SET status = 'Approved', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """,
-            (admin_notes, swap_id),
-        )
-        conn.commit()
-
-        from logic.snapshots import apply_live_schedule_for_date
-
-        apply_live_schedule_for_date(swap_date, None)
-        msg = "Swap approved — shifts exchanged for one day."
-        if manual_override:
-            msg = "Swap approved (supervisor override) — shifts exchanged for one day."
-        _notify_shift_swap_processed(swap_id, officer1, officer2, swap_date, "Approved")
-        return ProcessSwapResult(success=True, status="Approved", message=msg, overrides_created=True)
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Failed to process swap: {e}")
-        return ProcessSwapResult(success=False, message=str(e))
-    finally:
-        conn.close()
+            apply_live_schedule_for_date(swap_date, None)
+            msg = "Swap approved — shifts exchanged for one day."
+            if manual_override:
+                msg = "Swap approved (supervisor override) — shifts exchanged for one day."
+            _notify_shift_swap_processed(swap_id, officer1, officer2, swap_date, "Approved")
+            return ProcessSwapResult(success=True, status="Approved", message=msg, overrides_created=True)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to process swap: {e}")
+            return ProcessSwapResult(success=False, message=str(e))
 
 
 def get_shift_swap_requests(
@@ -302,8 +302,6 @@ def get_shift_swap_requests(
 ) -> List[Dict]:
     date_from = parse_date_filter(date_from)
     date_to = parse_date_filter(date_to)
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT s.*,
                o1.name AS officer1_name, o1.squad AS officer1_squad, o1.shift_start AS officer1_shift,
@@ -331,9 +329,10 @@ def get_shift_swap_requests(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY s.swap_date ASC, s.created_at ASC"
-    cursor.execute(query, tuple(params))
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
 
@@ -356,24 +355,22 @@ def create_notification(
     related_id: Optional[int] = None,
     related_type: Optional[str] = None,
 ) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO notifications
-            (recipient_officer_id, type, title, message, related_id, related_type)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """,
-            (recipient_officer_id, notification_type, title, message, related_id, related_type),
-        )
-        conn.commit()
-        return {"success": True, "notification_id": cursor.lastrowid}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO notifications
+                (recipient_officer_id, type, title, message, related_id, related_type)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (recipient_officer_id, notification_type, title, message, related_id, related_type),
+            )
+            conn.commit()
+            return {"success": True, "notification_id": cursor.lastrowid}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def get_notifications(
@@ -382,8 +379,6 @@ def get_notifications(
     type_filter: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT n.*, o.name AS recipient_name
         FROM notifications n
@@ -403,49 +398,46 @@ def get_notifications(
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY n.created_at DESC LIMIT ?"
     params.append(limit)
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
 
 def mark_notification_read(notification_id: int) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "UPDATE notifications SET is_read = 1 WHERE id = ?",
-            (notification_id,),
-        )
-        conn.commit()
-        if cursor.rowcount == 0:
-            return {"success": False, "message": "Notification not found"}
-        return {"success": True}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE notifications SET is_read = 1 WHERE id = ?",
+                (notification_id,),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                return {"success": False, "message": "Notification not found"}
+            return {"success": True}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def mark_all_notifications_read(officer_id: Optional[int] = None) -> Dict:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        if officer_id:
-            cursor.execute(
-                "UPDATE notifications SET is_read = 1 WHERE recipient_officer_id = ?",
-                (officer_id,),
-            )
-        else:
-            cursor.execute("UPDATE notifications SET is_read = 1")
-        conn.commit()
-        return {"success": True, "updated": cursor.rowcount}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            if officer_id:
+                cursor.execute(
+                    "UPDATE notifications SET is_read = 1 WHERE recipient_officer_id = ?",
+                    (officer_id,),
+                )
+            else:
+                cursor.execute("UPDATE notifications SET is_read = 1")
+            conn.commit()
+            return {"success": True, "updated": cursor.rowcount}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def resolve_notification_navigation(notification: Dict) -> Optional[Dict]:
@@ -581,134 +573,102 @@ def process_day_off_request(
     *,
     preferred_chain: Optional[List[Tuple[int, int]]] = None,
 ) -> ProcessRequestResult:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
-            FROM day_off_requests r
-            JOIN officers o ON r.officer_id = o.id
-            WHERE r.id = ?
-        """,
-            (request_id,),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return ProcessRequestResult(success=False, message="Request not found")
-
-        request = dict(row)
-        officer = get_officer_by_id(request["officer_id"])
-        precheck = validate_process_day_off(request, officer, action)
-        if not precheck.ok:
-            return ProcessRequestResult(success=False, message=precheck.message)
-
-        if action == "reject":
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
             cursor.execute(
                 """
-                UPDATE day_off_requests
-                SET status = 'Rejected', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
+                FROM day_off_requests r
+                JOIN officers o ON r.officer_id = o.id
+                WHERE r.id = ?
             """,
-                (admin_notes, request_id),
+                (request_id,),
             )
-            conn.commit()
-            _notify_day_off_processed(request, officer, "Rejected")
-            return ProcessRequestResult(success=True, status="Rejected", message="Request rejected.")
+            row = cursor.fetchone()
+            if not row:
+                return ProcessRequestResult(success=False, message="Request not found")
 
-        if action != "approve":
-            return ProcessRequestResult(success=False, message=f"Unknown action: {action}")
+            request = dict(row)
+            officer = get_officer_by_id(request["officer_id"])
+            precheck = validate_process_day_off(request, officer, action)
+            if not precheck.ok:
+                return ProcessRequestResult(success=False, message=precheck.message)
 
-        manual_override = request["status"] == REQUEST_STATUS["pending_manual"]
-        covered_start, _covered_end = resolve_officer_shift_band(
-            request["officer_id"],
-            parse_date(request["request_date"]),
-            home_shift_start=request.get("shift_start"),
-            home_shift_end=request.get("shift_end"),
-        )
-        suggestion = None
-        steps = []
-        if preferred_chain is not None:
-            # Supervisor-selected plan from multi-plan UI (list of (original_id, replacement_id)).
-            from models import BumpChainStep
-
-            for i, pair in enumerate(preferred_chain):
-                if not pair or len(pair) != 2:
-                    continue
-                orig_id, repl_id = int(pair[0]), int(pair[1])
-                orig = get_officer_by_id(orig_id)
-                repl = get_officer_by_id(repl_id)
-                if not orig or not repl:
-                    return ProcessRequestResult(
-                        success=False,
-                        message=f"Coverage plan references missing officer ({orig_id}→{repl_id})",
-                    )
-                orig_shift = covered_start if i == 0 else (orig.get("shift_start") or covered_start)
-                steps.append(
-                    BumpChainStep(
-                        step_number=i + 1,
-                        original_officer_id=orig_id,
-                        original_officer_name=orig["name"],
-                        original_shift=orig_shift,
-                        replacement_officer_id=repl_id,
-                        replacement_officer_name=repl["name"],
-                        replacement_shift=repl.get("shift_start") or "",
-                        replacement_on_duty=True,
-                    )
-                )
-            suggestion = type("S", (), {"success": True, "failure_reason": None, "message": "Selected coverage plan"})()
-        else:
-            from logic.coverage_optimizer import suggest_bump_chain
-
-            suggestion = suggest_bump_chain(
-                request["officer_id"],
-                request["request_date"],
-                request["squad"],
-                covered_start,
-                supervisor_override=manual_override,
-            )
-            if not manual_override and (not suggestion.success or suggestion.requires_manual):
+            if action == "reject":
                 cursor.execute(
                     """
                     UPDATE day_off_requests
-                    SET status = 'Pending Manual Review', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                    SET status = 'Rejected', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """,
-                    (admin_notes or suggestion.message, request_id),
+                    (admin_notes, request_id),
                 )
                 conn.commit()
-                request["status"] = REQUEST_STATUS["pending_manual"]
-                _notify_day_off_processed(request, officer, "Pending Manual Review")
-                return ProcessRequestResult(
-                    success=False,
-                    status="Pending Manual Review",
-                    message=suggestion.message,
-                    requires_manual=True,
-                )
-            steps = suggestion.steps or []
+                _notify_day_off_processed(request, officer, "Rejected")
+                return ProcessRequestResult(success=True, status="Rejected", message="Request rejected.")
 
-        # Continuous coverage gate (24/7 + extra windows) after tentative bump chain
-        if not manual_override:
-            from logic.coverage_windows_store import get_active_coverage_windows, get_coverage_247_minimum
+            if action != "approve":
+                return ProcessRequestResult(success=False, message=f"Unknown action: {action}")
 
-            min_247 = get_coverage_247_minimum()
-            windows = get_active_coverage_windows()
-            if min_247 > 0 or windows:
-                cov_check = _evaluate_post_bump_coverage(
-                    request["request_date"],
+            manual_override = request["status"] == REQUEST_STATUS["pending_manual"]
+            covered_start, _covered_end = resolve_officer_shift_band(
+                request["officer_id"],
+                parse_date(request["request_date"]),
+                home_shift_start=request.get("shift_start"),
+                home_shift_end=request.get("shift_end"),
+            )
+            suggestion = None
+            steps = []
+            if preferred_chain is not None:
+                # Supervisor-selected plan from multi-plan UI (list of (original_id, replacement_id)).
+                from models import BumpChainStep
+
+                for i, pair in enumerate(preferred_chain):
+                    if not pair or len(pair) != 2:
+                        continue
+                    orig_id, repl_id = int(pair[0]), int(pair[1])
+                    orig = get_officer_by_id(orig_id)
+                    repl = get_officer_by_id(repl_id)
+                    if not orig or not repl:
+                        return ProcessRequestResult(
+                            success=False,
+                            message=f"Coverage plan references missing officer ({orig_id}→{repl_id})",
+                        )
+                    orig_shift = covered_start if i == 0 else (orig.get("shift_start") or covered_start)
+                    steps.append(
+                        BumpChainStep(
+                            step_number=i + 1,
+                            original_officer_id=orig_id,
+                            original_officer_name=orig["name"],
+                            original_shift=orig_shift,
+                            replacement_officer_id=repl_id,
+                            replacement_officer_name=repl["name"],
+                            replacement_shift=repl.get("shift_start") or "",
+                            replacement_on_duty=True,
+                        )
+                    )
+                suggestion = type(
+                    "S", (), {"success": True, "failure_reason": None, "message": "Selected coverage plan"}
+                )()
+            else:
+                from logic.coverage_optimizer import suggest_bump_chain
+
+                suggestion = suggest_bump_chain(
                     request["officer_id"],
-                    steps,
-                    min_247=min_247,
-                    windows=windows,
+                    request["request_date"],
+                    request["squad"],
+                    covered_start,
+                    supervisor_override=manual_override,
                 )
-                if not cov_check.get("ok"):
+                if not manual_override and (not suggestion.success or suggestion.requires_manual):
                     cursor.execute(
                         """
                         UPDATE day_off_requests
                         SET status = 'Pending Manual Review', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
                         WHERE id = ?
                     """,
-                        (admin_notes or cov_check.get("message") or "Coverage window short", request_id),
+                        (admin_notes or suggestion.message, request_id),
                     )
                     conn.commit()
                     request["status"] = REQUEST_STATUS["pending_manual"]
@@ -716,104 +676,136 @@ def process_day_off_request(
                     return ProcessRequestResult(
                         success=False,
                         status="Pending Manual Review",
-                        message=cov_check.get("message") or "Coverage requirements not met",
+                        message=suggestion.message,
                         requires_manual=True,
                     )
+                steps = suggestion.steps or []
 
-        replacement_id = None
-        replacement_name = None
-        for step in steps:
-            _insert_override_record(
-                cursor,
-                request["request_date"],
-                step.original_officer_id,
-                step.replacement_officer_id,
-                f"Day-off: {request['request_type']}",
-                step.original_shift,
-            )
-            if replacement_id is None:
-                replacement_id = step.replacement_officer_id
-                replacement_name = step.replacement_officer_name
+            # Continuous coverage gate (24/7 + extra windows) after tentative bump chain
+            if not manual_override:
+                from logic.coverage_windows_store import get_active_coverage_windows, get_coverage_247_minimum
 
-        cascade_note = f" ({len(steps)} overrides)" if len(steps) > 1 else ""
-        if manual_override:
-            override_reason = suggestion.failure_reason
-            if not override_reason:
-                notes = (request.get("admin_notes") or "").lower()
-                if "minimum rest" in notes:
-                    override_reason = "minimum_rest"
-                elif "consecutive" in notes:
-                    override_reason = "consecutive_days"
-            message = f"Approved (supervisor override). Replacement: {replacement_name}{cascade_note}"
-            if override_reason == "minimum_rest":
-                message = f"Approved (minimum rest override). Replacement: {replacement_name}{cascade_note}"
-            elif override_reason == "consecutive_days":
-                message = f"Approved (consecutive day override). Replacement: {replacement_name}{cascade_note}"
-        else:
-            message = f"Approved. Replacement: {replacement_name}{cascade_note}"
-
-        cursor.execute(
-            """
-            UPDATE day_off_requests
-            SET status = 'Approved', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """,
-            (admin_notes, request_id),
-        )
-        conn.commit()
-        from logic.snapshots import apply_live_schedule_for_date
-
-        apply_live_schedule_for_date(request["request_date"], actor_user_id)
-        # Call list: ordered/off-duty cover moves officer to end (furthest from next call)
-        try:
-            from logic.ot_fill import move_officer_to_end_of_call_list
-
-            for step in steps:
-                if not getattr(step, "replacement_on_duty", True):
-                    move_officer_to_end_of_call_list(
-                        int(step.replacement_officer_id),
-                        user_id=actor_user_id,
+                min_247 = get_coverage_247_minimum()
+                windows = get_active_coverage_windows()
+                if min_247 > 0 or windows:
+                    cov_check = _evaluate_post_bump_coverage(
+                        request["request_date"],
+                        request["officer_id"],
+                        steps,
+                        min_247=min_247,
+                        windows=windows,
                     )
-                    break
-        except Exception:
-            pass
-        # Accrual debit (vacation/sick/comp) — non-blocking if bank short
-        try:
-            from logic.leave_accruals import maybe_deduct_on_day_off_approve
+                    if not cov_check.get("ok"):
+                        cursor.execute(
+                            """
+                            UPDATE day_off_requests
+                            SET status = 'Pending Manual Review', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        """,
+                            (admin_notes or cov_check.get("message") or "Coverage window short", request_id),
+                        )
+                        conn.commit()
+                        request["status"] = REQUEST_STATUS["pending_manual"]
+                        _notify_day_off_processed(request, officer, "Pending Manual Review")
+                        return ProcessRequestResult(
+                            success=False,
+                            status="Pending Manual Review",
+                            message=cov_check.get("message") or "Coverage requirements not met",
+                            requires_manual=True,
+                        )
 
-            maybe_deduct_on_day_off_approve(request, user_id=actor_user_id)
-        except Exception:
-            pass
-        # Plan text for notifications (who covers whom)
-        plan_text = ""
-        if steps:
-            parts = []
-            for step in steps[:6]:
-                parts.append(
-                    f"{getattr(step, 'replacement_officer_name', '?')} covers "
-                    f"{getattr(step, 'original_officer_name', '?')}"
+            replacement_id = None
+            replacement_name = None
+            for step in steps:
+                _insert_override_record(
+                    cursor,
+                    request["request_date"],
+                    step.original_officer_id,
+                    step.replacement_officer_id,
+                    f"Day-off: {request['request_type']}",
+                    step.original_shift,
                 )
-            plan_text = "; ".join(parts)
-        _notify_day_off_processed(
-            request,
-            officer,
-            "Approved",
-            replacement_id,
-            replacement_name,
-            plan_text=plan_text,
-        )
-        return ProcessRequestResult(
-            success=True,
-            status="Approved",
-            message=message,
-            override_created=bool(steps),
-        )
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"process_day_off_request failed: {e}")
-        return ProcessRequestResult(success=False, message=str(e))
-    finally:
-        conn.close()
+                if replacement_id is None:
+                    replacement_id = step.replacement_officer_id
+                    replacement_name = step.replacement_officer_name
+
+            cascade_note = f" ({len(steps)} overrides)" if len(steps) > 1 else ""
+            if manual_override:
+                override_reason = suggestion.failure_reason
+                if not override_reason:
+                    notes = (request.get("admin_notes") or "").lower()
+                    if "minimum rest" in notes:
+                        override_reason = "minimum_rest"
+                    elif "consecutive" in notes:
+                        override_reason = "consecutive_days"
+                message = f"Approved (supervisor override). Replacement: {replacement_name}{cascade_note}"
+                if override_reason == "minimum_rest":
+                    message = f"Approved (minimum rest override). Replacement: {replacement_name}{cascade_note}"
+                elif override_reason == "consecutive_days":
+                    message = f"Approved (consecutive day override). Replacement: {replacement_name}{cascade_note}"
+            else:
+                message = f"Approved. Replacement: {replacement_name}{cascade_note}"
+
+            cursor.execute(
+                """
+                UPDATE day_off_requests
+                SET status = 'Approved', admin_notes = ?, processed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """,
+                (admin_notes, request_id),
+            )
+            conn.commit()
+            from logic.snapshots import apply_live_schedule_for_date
+
+            apply_live_schedule_for_date(request["request_date"], actor_user_id)
+            # Call list: ordered/off-duty cover moves officer to end (furthest from next call)
+            try:
+                from logic.ot_fill import move_officer_to_end_of_call_list
+
+                for step in steps:
+                    if not getattr(step, "replacement_on_duty", True):
+                        move_officer_to_end_of_call_list(
+                            int(step.replacement_officer_id),
+                            user_id=actor_user_id,
+                        )
+                        break
+            except Exception:
+                pass
+            # Accrual debit (vacation/sick/comp) — non-blocking if bank short
+            try:
+                from logic.leave_accruals import maybe_deduct_on_day_off_approve
+
+                maybe_deduct_on_day_off_approve(request, user_id=actor_user_id)
+            except Exception:
+                pass
+            # Plan text for notifications (who covers whom)
+            plan_text = ""
+            if steps:
+                parts = []
+                for step in steps[:6]:
+                    parts.append(
+                        f"{getattr(step, 'replacement_officer_name', '?')} covers "
+                        f"{getattr(step, 'original_officer_name', '?')}"
+                    )
+                plan_text = "; ".join(parts)
+            _notify_day_off_processed(
+                request,
+                officer,
+                "Approved",
+                replacement_id,
+                replacement_name,
+                plan_text=plan_text,
+            )
+            return ProcessRequestResult(
+                success=True,
+                status="Approved",
+                message=message,
+                override_created=bool(steps),
+            )
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"process_day_off_request failed: {e}")
+            return ProcessRequestResult(success=False, message=str(e))
 
 
 def _sort_for_vacation_granting(requests: List[Dict]) -> List[Dict]:
@@ -918,57 +910,54 @@ def create_day_off_request(
         if not check.ok:
             return {"success": False, "message": check.message}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT 1 FROM day_off_requests
-            WHERE officer_id = ? AND request_date = ?
-            AND status IN ('Pending', 'Pending Manual Review')
-        """,
-            (officer_id, request_date),
-        )
-        if cursor.fetchone():
-            dup = validate_no_duplicate_pending(True, officer["name"], request_date)
-            return {"success": False, "message": dup.message}
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT 1 FROM day_off_requests
+                WHERE officer_id = ? AND request_date = ?
+                AND status IN ('Pending', 'Pending Manual Review')
+            """,
+                (officer_id, request_date),
+            )
+            if cursor.fetchone():
+                dup = validate_no_duplicate_pending(True, officer["name"], request_date)
+                return {"success": False, "message": dup.message}
 
-        cursor.execute(
-            """
-            INSERT INTO day_off_requests (officer_id, request_date, request_type, notes, status)
-            VALUES (?, ?, ?, ?, 'Pending')
-        """,
-            (officer_id, request_date, request_type, notes),
-        )
-        request_id = cursor.lastrowid
-        cursor.execute(
-            "SELECT created_at FROM day_off_requests WHERE id = ?",
-            (request_id,),
-        )
-        created_row = cursor.fetchone()
-        created_at = created_row["created_at"] if created_row else None
-        conn.commit()
-        _notify_day_off_submitted(request_id, officer, request_date, request_type)
-        return {"success": True, "request_id": request_id, "created_at": created_at}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+            cursor.execute(
+                """
+                INSERT INTO day_off_requests (officer_id, request_date, request_type, notes, status)
+                VALUES (?, ?, ?, ?, 'Pending')
+            """,
+                (officer_id, request_date, request_type, notes),
+            )
+            request_id = cursor.lastrowid
+            cursor.execute(
+                "SELECT created_at FROM day_off_requests WHERE id = ?",
+                (request_id,),
+            )
+            created_row = cursor.fetchone()
+            created_at = created_row["created_at"] if created_row else None
+            conn.commit()
+            _notify_day_off_submitted(request_id, officer, request_date, request_type)
+            return {"success": True, "request_id": request_id, "created_at": created_at}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def get_pending_day_off_requests() -> List[Dict]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end, o.seniority_rank
-        FROM day_off_requests r
-        JOIN officers o ON r.officer_id = o.id
-        WHERE r.status IN ('Pending', 'Pending Manual Review')
-        ORDER BY r.request_date ASC
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end, o.seniority_rank
+            FROM day_off_requests r
+            JOIN officers o ON r.officer_id = o.id
+            WHERE r.status IN ('Pending', 'Pending Manual Review')
+            ORDER BY r.request_date ASC
+        """)
+        rows = cursor.fetchall()
     return _sort_for_vacation_granting([dict(row) for row in rows])
 
 
@@ -980,8 +969,6 @@ def get_day_off_requests(
 ) -> List[Dict]:
     date_from = parse_date_filter(date_from)
     date_to = parse_date_filter(date_to)
-    conn = get_connection()
-    cursor = conn.cursor()
     query = """
         SELECT r.*, o.name AS officer_name, o.squad, o.shift_start, o.shift_end
         FROM day_off_requests r
@@ -1004,22 +991,22 @@ def get_day_off_requests(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY r.request_date DESC, r.created_at DESC"
-    cursor.execute(query, tuple(params))
-    rows = cursor.fetchall()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
 
 def get_day_off_request_created_at(request_id: int) -> Dict:
     """Return the stored created_at timestamp for a day-off request."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, created_at FROM day_off_requests WHERE id = ?",
-        (request_id,),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, created_at FROM day_off_requests WHERE id = ?",
+            (request_id,),
+        )
+        row = cursor.fetchone()
     if not row:
         return {"success": False, "message": "Request not found"}
     return {
@@ -1287,14 +1274,13 @@ def _notify_shift_bid_event_finalized(
 ) -> None:
     title = event.get("title") or "Shift bid"
     award_by_officer = {a["officer_id"]: a for a in awards}
-    cursor_conn = get_connection()
-    cursor = cursor_conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT officer_id FROM shift_bid_rankings WHERE event_id = ?",
-        (event_id,),
-    )
-    respondents = [row["officer_id"] for row in cursor.fetchall()]
-    cursor_conn.close()
+    with connection() as cursor_conn:
+        cursor = cursor_conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT officer_id FROM shift_bid_rankings WHERE event_id = ?",
+            (event_id,),
+        )
+        respondents = [row["officer_id"] for row in cursor.fetchall()]
 
     for officer_id in respondents:
         award = award_by_officer.get(officer_id)
@@ -1410,24 +1396,22 @@ def _notify_supervisors(
 
 
 def get_notification_types() -> List[str]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT type FROM notifications ORDER BY type")
-    types = [row["type"] for row in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT type FROM notifications ORDER BY type")
+        types = [row["type"] for row in cursor.fetchall()]
     return types
 
 
 def get_unread_notification_count(officer_id: Optional[int] = None) -> int:
-    conn = get_connection()
-    cursor = conn.cursor()
-    if officer_id:
-        cursor.execute(
-            "SELECT COUNT(*) FROM notifications WHERE recipient_officer_id = ? AND is_read = 0",
-            (officer_id,),
-        )
-    else:
-        cursor.execute("SELECT COUNT(*) FROM notifications WHERE is_read = 0")
-    count = cursor.fetchone()[0]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        if officer_id:
+            cursor.execute(
+                "SELECT COUNT(*) FROM notifications WHERE recipient_officer_id = ? AND is_read = 0",
+                (officer_id,),
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM notifications WHERE is_read = 0")
+        count = cursor.fetchone()[0]
     return count

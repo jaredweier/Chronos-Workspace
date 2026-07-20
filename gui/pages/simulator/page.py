@@ -292,325 +292,396 @@ def render_simulator() -> None:
                     pass
 
             with ui.element("div").classes("grid-2"):
+
+                def _run_phase(limit: int):
+                    try:
+                        kwargs = _baseline_kwargs()
+                        if kwargs.get("error"):
+                            ui.notify(kwargs["error"] or "Check Numeric Fields", type="negative")
+                            return
+                        if kwargs.get("shift_length_hours") is None:
+                            ui.notify("Lock Shift Length before continuing", type="warning")
+                            return
+                        if not kwargs.get("shift_starts"):
+                            ui.notify("Lock Shift Starts before continuing", type="warning")
+                            return
+                        if kwargs.get("annual_hours_target") is None:
+                            ui.notify("Lock Annual Hours before continuing", type="warning")
+                            return
+                        kwargs["phase_limit"] = limit
+                        kwargs.pop("required_cert_codes", None)
+                        from logic.scheduling_sim import run_schedule_simulation
+
+                        res = run_schedule_simulation(**kwargs)
+                        if res.get("success"):
+                            ui.notify(res.get("message", "Success"), type="positive")
+                            req_stepper.next()
+                        else:
+                            ui.notify(res.get("message", "Failed"), type="negative")
+                    except Exception as e:
+                        ui.notify(f"Error: {e}", type="negative")
+
                 with panel("Coverage Requirements"):
-                    # Fixed grid rows — never remove from layout
+                    with ui.stepper().props("vertical").classes("w-full bg-transparent shadow-none") as req_stepper:
+                        with ui.step("Phase 1: Math Bounds").classes("sim-stepper-step"):
+                            # Fixed grid rows — never remove from layout
 
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_start_date = ui.checkbox("Target Start Date", value=False)
-                        with ui.element("div"):
-                            sim_start_date = ui.input(
-                                label="YYYY-MM-DD",
-                                value="",
-                                placeholder="e.g. 2026-07-17",
-                            ).classes("w-full")
-                    use_start_date.on_value_change(lambda e: _set_enabled([sim_start_date], bool(e.value)))
-                    _set_enabled([sim_start_date], False)
-
-                    # All locks start OFF / empty — restored from last saved constraints.
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_rotation = given_solve_toggle(ui, "Rotation Pattern")
-                        with ui.element("div"):
-                            rotation = (
-                                ui.select(
-                                    _ROTATION_OPTIONS,
-                                    value=_placeholder_rot,
-                                    label="Pattern",
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
                                 )
-                                .classes("w-full")
-                                .props("outlined dense dark")
-                            )
-                            hint_rotation = ui.label("Solve for: every rotation pattern is searched").classes(
-                                "sim-free-hint"
-                            )
-                    use_rotation.on_value_change(lambda e: _set_enabled([rotation], bool(e.value)))
-                    _set_enabled([rotation], False)
+                            ):
+                                use_start_date = ui.checkbox("Target Start Date", value=False)
+                                with ui.element("div"):
+                                    sim_start_date = ui.input(
+                                        label="YYYY-MM-DD",
+                                        value="",
+                                        placeholder="e.g. 2026-07-17",
+                                    ).classes("w-full")
+                            use_start_date.on_value_change(lambda e: _set_enabled([sim_start_date], bool(e.value)))
+                            _set_enabled([sim_start_date], False)
 
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_officers = given_solve_toggle(ui, "Officer Count")
-                        with ui.element("div"):
-                            officers = ui.input(
-                                label="Number Of Officers",
-                                value="",
-                                placeholder="e.g. 8",
-                            ).classes("w-full")
-                            hint_officers = ui.label("Solve for: 4–20 officers searched (all depths)").classes(
-                                "sim-free-hint"
-                            )
-
-                    def _on_lock_officers(e=None):
-                        _set_enabled([officers], bool(use_officers.value))
-                        try:
-                            _refresh_space_estimate()
-                        except Exception:
-                            pass
-
-                    use_officers.on_value_change(_on_lock_officers)
-                    _set_enabled([officers], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_length = given_solve_toggle(ui, "Shift Length")
-                        with ui.element("div"):
-                            length = ui.input(
-                                label="Hours (0.5 Steps)",
-                                value="",
-                                placeholder="e.g. 8",
-                            ).classes("w-full")
-                            hint_length = ui.label(
-                                "Solve for: 8/10/12h (Standard) · 8–12h in half-hour steps (Deep)"
-                            ).classes("sim-free-hint")
-
-                    def _on_lock_length(e=None):
-                        _set_enabled([length], bool(use_length.value))
-                        try:
-                            _refresh_space_estimate()
-                        except Exception:
-                            pass
-
-                    use_length.on_value_change(_on_lock_length)
-                    _set_enabled([length], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_annual = ui.checkbox("Require: Annual Hours Target", value=False)
-                        with ui.element("div"):
-                            annual = ui.input(
-                                label="Annual Hours Target",
-                                value="",
-                                placeholder="e.g. 2008",
-                            ).classes("w-full")
-                            annual_var = ui.input(
-                                label="Allowed Variance (± Hours)",
-                                value="",
-                                placeholder="e.g. 20",
-                            ).classes("w-full")
-                    use_annual.on_value_change(lambda e: _set_enabled([annual, annual_var], bool(e.value)))
-                    _set_enabled([annual, annual_var], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_starts = given_solve_toggle(ui, "Shift Start Times")
-                        with ui.element("div"):
-                            starts = ui.input(
-                                label="Starts (Comma-Separated)",
-                                value="",
-                                placeholder="e.g. 06:00, 14:00, 19:00, 22:00",
-                            ).classes("w-full")
-                            hint_starts = ui.label("Solve for: realistic start packs searched per length").classes(
-                                "sim-free-hint"
-                            )
-                            ui.html(
-                                '<div style="font-size: 0.8rem; color: var(--sim-muted); margin-top: 4px;">Real-world 8h pack (e.g. 06:00, 14:00, 22:00) provides 3 equal 8-hour shift bands.</div>'
-                            )
-
-                    def _on_lock_starts(e=None):
-                        _set_enabled([starts], bool(use_starts.value))
-                        try:
-                            _refresh_space_estimate()
-                        except Exception:
-                            pass
-
-                    use_starts.on_value_change(_on_lock_starts)
-                    _set_enabled([starts], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_min_ps = ui.checkbox("Require: Minimum Officers Per Shift", value=False)
-                        with ui.element("div"):
-                            min_ps = ui.input(
-                                label="Minimum Officers Per Shift",
-                                value="",
-                                placeholder="e.g. 1",
-                            ).classes("w-full")
-
-                    def _on_lock_min_ps(e=None):
-                        _set_enabled([min_ps], bool(use_min_ps.value))
-                        try:
-                            _refresh_space_estimate()
-                        except Exception:
-                            pass
-
-                    use_min_ps.on_value_change(_on_lock_min_ps)
-                    _set_enabled([min_ps], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_247 = ui.checkbox("Require: 24/7 Continuous Minimum", value=False)
-                        with ui.element("div"):
-                            cov247 = ui.input(
-                                label="Minimum On Duty At All Times",
-                                value="",
-                                placeholder="e.g. 1",
-                            ).classes("w-full")
-                    use_247.on_value_change(lambda e: _set_enabled([cov247], bool(e.value)))
-                    _set_enabled([cov247], False)
-
-                    with (
-                        ui.element("div")
-                        .classes("w-full grid sim-option-card")
-                        .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                    ):
-                        use_style = given_solve_toggle(ui, "Rotation Style / Multi-Block")
-                        with ui.element("div"):
-                            hint_style = ui.label("Solve for: fixed and rotating multi-block styles searched").classes(
-                                "sim-free-hint"
-                            )
-                            rot_style = (
-                                ui.select(_STYLE_OPTIONS, value="Rotating", label="Style")
-                                .classes("w-full")
-                                .props("outlined dense dark")
-                            )
-                            multi_catalog = (
-                                ui.select(
-                                    _MULTI_BLOCK_LABELS,
-                                    value=_MULTI_BLOCK_LABELS[0],
-                                    label="Common Police Pattern",
+                            # All locks start OFF / empty — restored from last saved constraints.
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
                                 )
-                                .classes("w-full")
-                                .props("outlined dense dark")
-                            )
-                            variations = ui.input(
-                                label="Patterns (| Separates Variations)",
-                                value="",
-                                placeholder="e.g. 6-2,5-3 | 6-3,5-2",
-                            ).classes("w-full")
+                            ):
+                                use_rotation = given_solve_toggle(ui, "Rotation Pattern")
+                                with ui.element("div"):
+                                    rotation = (
+                                        ui.select(
+                                            _ROTATION_OPTIONS,
+                                            value=_placeholder_rot,
+                                            label="Pattern",
+                                        )
+                                        .classes("w-full")
+                                        .props("outlined dense dark")
+                                    )
+                                    hint_rotation = ui.label("Solve for: every rotation pattern is searched").classes(
+                                        "sim-free-hint"
+                                    )
+                            use_rotation.on_value_change(lambda e: _set_enabled([rotation], bool(e.value)))
+                            _set_enabled([rotation], False)
 
-                            def _apply_multi_catalog(e=None):
-                                cat = _MULTI_BY_LABEL.get(multi_catalog.value or "")
-                                if not cat:
-                                    return
-                                if cat.get("variations"):
-                                    variations.value = cat["variations"]
-                                st = (cat.get("style") or "rotating").lower()
-                                rot_style.value = "Rotating" if st == "rotating" else "Fixed"
-                                use_style.value = True
-                                _set_enabled([rot_style, multi_catalog, variations], True)
-                                _persist_form()
-
-                            multi_catalog.on_value_change(_apply_multi_catalog)
-                    use_style.on_value_change(
-                        lambda e: _set_enabled([rot_style, multi_catalog, variations], bool(e.value))
-                    )
-                    _set_enabled([rot_style, multi_catalog, variations], False)
-
-                    with ui.expansion(
-                        "Advanced requirements (bumps, off-day OT, certs, fatigue, FLSA)",
-                        icon="tune",
-                        value=False,
-                    ).classes("sim-adv w-full q-mt-sm"):
-                        with (
-                            ui.element("div")
-                            .classes("w-full grid sim-option-card")
-                            .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                        ):
-                            use_nearby = ui.checkbox("Allow: Nearby Start Bumps (Work Days)", value=False)
-                            with ui.element("div"):
-                                nearby_hops = ui.input(
-                                    label="Bumps Allowed (± Pack Bands From Home)",
-                                    value="",
-                                    placeholder="e.g. 1",
-                                ).classes("w-full")
-                                ui.label("Example: home 19:00 with 1 bump → 14:00 or 22:00 on ON days only.").style(
-                                    _HINT
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
                                 )
-                        use_nearby.on_value_change(lambda e: _set_enabled([nearby_hops], bool(e.value)))
-                        _set_enabled([nearby_hops], False)
-                        with (
-                            ui.element("div")
-                            .classes("w-full grid sim-option-card")
-                            .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                        ):
-                            allow_offday = ui.checkbox(
-                                "Allow Off-Day Coverage (OT Call-In)",
+                            ):
+                                use_officers = given_solve_toggle(ui, "Officer Count")
+                                with ui.element("div"):
+                                    officers = ui.input(
+                                        label="Number Of Officers",
+                                        value="",
+                                        placeholder="e.g. 8",
+                                    ).classes("w-full")
+                                    hint_officers = ui.label("Solve for: 4–20 officers searched (all depths)").classes(
+                                        "sim-free-hint"
+                                    )
+
+                            def _on_lock_officers(e=None):
+                                _set_enabled([officers], bool(use_officers.value))
+                                try:
+                                    _refresh_space_estimate()
+                                except Exception:
+                                    pass
+
+                            use_officers.on_value_change(_on_lock_officers)
+                            _set_enabled([officers], False)
+
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_length = given_solve_toggle(ui, "Shift Length")
+                                with ui.element("div"):
+                                    length = ui.input(
+                                        label="Hours (0.5 Steps)",
+                                        value="",
+                                        placeholder="e.g. 8",
+                                    ).classes("w-full")
+                                    hint_length = ui.label(
+                                        "Solve for: 8/10/12h (Standard) · 8–12h in half-hour steps (Deep)"
+                                    ).classes("sim-free-hint")
+
+                            def _on_lock_length(e=None):
+                                _set_enabled([length], bool(use_length.value))
+                                try:
+                                    _refresh_space_estimate()
+                                except Exception:
+                                    pass
+
+                            use_length.on_value_change(_on_lock_length)
+                            _set_enabled([length], False)
+
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_annual = ui.checkbox("Require: Annual Hours Target", value=False)
+                                with ui.element("div"):
+                                    annual = ui.input(
+                                        label="Annual Hours Target",
+                                        value="",
+                                        placeholder="e.g. 2008",
+                                    ).classes("w-full")
+                                    annual_var = ui.input(
+                                        label="Allowed Variance (± Hours)",
+                                        value="",
+                                        placeholder="e.g. 20",
+                                    ).classes("w-full")
+                            use_annual.on_value_change(lambda e: _set_enabled([annual, annual_var], bool(e.value)))
+                            _set_enabled([annual, annual_var], False)
+
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_starts = given_solve_toggle(ui, "Shift Start Times")
+                                with ui.element("div"):
+                                    starts = ui.input(
+                                        label="Starts (Comma-Separated)",
+                                        value="",
+                                        placeholder="e.g. 06:00, 14:00, 19:00, 22:00",
+                                    ).classes("w-full")
+                                    hint_starts = ui.label(
+                                        "Solve for: realistic start packs searched per length"
+                                    ).classes("sim-free-hint")
+                                    ui.html(
+                                        '<div style="font-size: 0.8rem; color: var(--sim-muted); margin-top: 4px;">Real-world 8h pack (e.g. 06:00, 14:00, 22:00) provides 3 equal 8-hour shift bands.</div>'
+                                    )
+
+                            def _on_lock_starts(e=None):
+                                _set_enabled([starts], bool(use_starts.value))
+                                try:
+                                    _refresh_space_estimate()
+                                except Exception:
+                                    pass
+
+                            use_starts.on_value_change(_on_lock_starts)
+                            _set_enabled([starts], False)
+
+                            with ui.stepper_navigation():
+                                ui.button("Run Math Bounds", on_click=lambda: _run_phase(1)).props("color=primary")
+                        with ui.step("Phase 2: Chronological Assignments").classes("sim-stepper-step"):
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_min_ps = ui.checkbox("Require: Minimum Officers Per Shift", value=False)
+                                with ui.element("div"):
+                                    min_ps = ui.input(
+                                        label="Minimum Officers Per Shift",
+                                        value="",
+                                        placeholder="e.g. 1",
+                                    ).classes("w-full")
+
+                            def _on_lock_min_ps(e=None):
+                                _set_enabled([min_ps], bool(use_min_ps.value))
+                                try:
+                                    _refresh_space_estimate()
+                                except Exception:
+                                    pass
+
+                            use_min_ps.on_value_change(_on_lock_min_ps)
+                            _set_enabled([min_ps], False)
+
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_247 = ui.checkbox("Require: 24/7 Continuous Minimum", value=False)
+                                with ui.element("div"):
+                                    cov247 = ui.input(
+                                        label="Minimum On Duty At All Times",
+                                        value="",
+                                        placeholder="e.g. 1",
+                                    ).classes("w-full")
+                            use_247.on_value_change(lambda e: _set_enabled([cov247], bool(e.value)))
+                            _set_enabled([cov247], False)
+
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_style = given_solve_toggle(ui, "Rotation Style / Multi-Block")
+                                with ui.element("div"):
+                                    hint_style = ui.label(
+                                        "Solve for: fixed and rotating multi-block styles searched"
+                                    ).classes("sim-free-hint")
+                                    rot_style = (
+                                        ui.select(_STYLE_OPTIONS, value="Rotating", label="Style")
+                                        .classes("w-full")
+                                        .props("outlined dense dark")
+                                    )
+                                    multi_catalog = (
+                                        ui.select(
+                                            _MULTI_BLOCK_LABELS,
+                                            value=_MULTI_BLOCK_LABELS[0],
+                                            label="Common Police Pattern",
+                                        )
+                                        .classes("w-full")
+                                        .props("outlined dense dark")
+                                    )
+                                    variations = ui.input(
+                                        label="Patterns (| Separates Variations)",
+                                        value="",
+                                        placeholder="e.g. 6-2,5-3 | 6-3,5-2",
+                                    ).classes("w-full")
+
+                                    def _apply_multi_catalog(e=None):
+                                        cat = _MULTI_BY_LABEL.get(multi_catalog.value or "")
+                                        if not cat:
+                                            return
+                                        if cat.get("variations"):
+                                            variations.value = cat["variations"]
+                                        st = (cat.get("style") or "rotating").lower()
+                                        rot_style.value = "Rotating" if st == "rotating" else "Fixed"
+                                        use_style.value = True
+                                        _set_enabled([rot_style, multi_catalog, variations], True)
+                                        _persist_form()
+
+                                    multi_catalog.on_value_change(_apply_multi_catalog)
+                            use_style.on_value_change(
+                                lambda e: _set_enabled([rot_style, multi_catalog, variations], bool(e.value))
+                            )
+                            _set_enabled([rot_style, multi_catalog, variations], False)
+
+                            with ui.expansion(
+                                "Advanced requirements (bumps, off-day OT, certs, fatigue, FLSA)",
+                                icon="tune",
                                 value=False,
-                            )
-                            with ui.element("div"):
-                                ui.label("Only when checked: multi-block OFF days may fill windows.").style(_HINT)
+                            ).classes("sim-adv w-full q-mt-sm"):
+                                with (
+                                    ui.element("div")
+                                    .classes("w-full grid sim-option-card")
+                                    .style(
+                                        "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                    )
+                                ):
+                                    use_nearby = ui.checkbox("Allow: Nearby Start Bumps (Work Days)", value=False)
+                                    with ui.element("div"):
+                                        nearby_hops = ui.input(
+                                            label="Bumps Allowed (± Pack Bands From Home)",
+                                            value="",
+                                            placeholder="e.g. 1",
+                                        ).classes("w-full")
+                                        ui.label(
+                                            "Example: home 19:00 with 1 bump → 14:00 or 22:00 on ON days only."
+                                        ).style(_HINT)
+                                use_nearby.on_value_change(lambda e: _set_enabled([nearby_hops], bool(e.value)))
+                                _set_enabled([nearby_hops], False)
+                                with (
+                                    ui.element("div")
+                                    .classes("w-full grid sim-option-card")
+                                    .style(
+                                        "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                    )
+                                ):
+                                    allow_offday = ui.checkbox(
+                                        "Allow Off-Day Coverage (OT Call-In)",
+                                        value=False,
+                                    )
+                                    with ui.element("div"):
+                                        ui.label("Only when checked: multi-block OFF days may fill windows.").style(
+                                            _HINT
+                                        )
 
-                        with (
-                            ui.element("div")
-                            .classes("w-full grid sim-option-card")
-                            .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                        ):
-                            use_certs = ui.checkbox("Require: Cert Codes (Fill Gate)", value=False)
-                            with ui.element("div"):
-                                cert_codes = ui.input(
-                                    label="Cert Codes (Comma-Separated)",
-                                    value="",
-                                    placeholder="e.g. FTO, K9, EMT",
-                                ).classes("w-full")
-                                ui.label(
-                                    "Only officers holding these codes are eligible when "
-                                    "applying home starts / open-shift style fills."
-                                ).style(_HINT)
-                        use_certs.on_value_change(lambda e: _set_enabled([cert_codes], bool(e.value)))
-                        _set_enabled([cert_codes], False)
+                                with (
+                                    ui.element("div")
+                                    .classes("w-full grid sim-option-card")
+                                    .style(
+                                        "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                    )
+                                ):
+                                    use_certs = ui.checkbox("Require: Cert Codes (Fill Gate)", value=False)
+                                    with ui.element("div"):
+                                        cert_codes = ui.input(
+                                            label="Cert Codes (Comma-Separated)",
+                                            value="",
+                                            placeholder="e.g. FTO, K9, EMT",
+                                        ).classes("w-full")
+                                        ui.label(
+                                            "Only officers holding these codes are eligible when "
+                                            "applying home starts / open-shift style fills."
+                                        ).style(_HINT)
+                                use_certs.on_value_change(lambda e: _set_enabled([cert_codes], bool(e.value)))
+                                _set_enabled([cert_codes], False)
 
-                        with (
-                            ui.element("div")
-                            .classes("w-full grid sim-option-card")
-                            .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                        ):
-                            use_fatigue = ui.checkbox("Require: Fatigue / Rest Rules", value=False)
-                            with ui.element("div"):
-                                min_rest = ui.input(
-                                    label="Min Rest Hours Between Work Days",
-                                    value="",
-                                    placeholder="e.g. 8",
-                                ).classes("w-full")
-                                max_consec = ui.input(
-                                    label="Max Consecutive Work Days (0=off)",
-                                    value="",
-                                    placeholder="e.g. 6",
-                                ).classes("w-full")
-                                ui.label(
-                                    "Optional hard fatigue: rest between consecutive duty days; cap multi-block ON streaks."
-                                ).style(_HINT)
-                        use_fatigue.on_value_change(lambda e: _set_enabled([min_rest, max_consec], bool(e.value)))
-                        _set_enabled([min_rest, max_consec], False)
+                                with ui.stepper_navigation():
+                                    ui.button("Run Coverage", on_click=lambda: _run_phase(2)).props("color=primary")
+                                    ui.button("Back", on_click=req_stepper.previous).props("flat")
+                        with ui.step("Phase 3: Labor Compliance").classes("sim-stepper-step"):
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_fatigue = ui.checkbox("Require: Fatigue / Rest Rules", value=False)
+                                with ui.element("div"):
+                                    min_rest = ui.input(
+                                        label="Min Rest Hours Between Work Days",
+                                        value="",
+                                        placeholder="e.g. 8",
+                                    ).classes("w-full")
+                                    max_consec = ui.input(
+                                        label="Max Consecutive Work Days (0=off)",
+                                        value="",
+                                        placeholder="e.g. 6",
+                                    ).classes("w-full")
+                                    ui.label(
+                                        "Optional hard fatigue: rest between consecutive duty days; cap multi-block ON streaks."
+                                    ).style(_HINT)
+                            use_fatigue.on_value_change(lambda e: _set_enabled([min_rest, max_consec], bool(e.value)))
+                            _set_enabled([min_rest, max_consec], False)
 
-                        with (
-                            ui.element("div")
-                            .classes("w-full grid sim-option-card")
-                            .style("grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;")
-                        ):
-                            use_flsa = ui.checkbox("Require: Avoid FLSA Overtime", value=False)
-                            with ui.element("div"):
-                                flsa_days = ui.input(
-                                    label="FLSA Work Period Days (7–28)",
-                                    value="",
-                                    placeholder="e.g. 28",
-                                ).classes("w-full")
-                        use_flsa.on_value_change(lambda e: _set_enabled([flsa_days], bool(e.value)))
-                        _set_enabled([flsa_days], False)
+                            with (
+                                ui.element("div")
+                                .classes("w-full grid sim-option-card")
+                                .style(
+                                    "grid-template-columns: minmax(200px, 1fr) 2fr; align-items: center; gap: 1.5rem;"
+                                )
+                            ):
+                                use_flsa = ui.checkbox("Require: Avoid FLSA Overtime", value=False)
+                                with ui.element("div"):
+                                    flsa_days = ui.input(
+                                        label="FLSA Work Period Days (7–28)",
+                                        value="",
+                                        placeholder="e.g. 28",
+                                    ).classes("w-full")
+                            use_flsa.on_value_change(lambda e: _set_enabled([flsa_days], bool(e.value)))
+                            _set_enabled([flsa_days], False)
 
+                        with ui.stepper_navigation():
+                            ui.button("Finalize Settings", on_click=req_stepper.next).props("color=primary")
+                            ui.button("Back", on_click=req_stepper.previous).props("flat")
                 with panel("Extra Minimum Staffing Windows"):
                     ui.label(
                         "When checked, every window below is a hard minimum. "

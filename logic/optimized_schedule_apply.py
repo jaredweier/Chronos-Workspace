@@ -276,11 +276,10 @@ def apply_schedule_builder_defaults_to_department(*, user_id: Optional[int] = No
 
 
 def _unlock_base_if_needed(year: int, month: int) -> None:
-    from database import get_connection
+    from database import connection
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
+    with connection() as conn:
+        cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE schedule_snapshots SET locked = 0
@@ -289,8 +288,6 @@ def _unlock_base_if_needed(year: int, month: int) -> None:
             (year, month),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def preview_implement_plan(
@@ -461,11 +458,10 @@ def implement_optimized_plan(
     if force_regenerate:
         _unlock_base_if_needed(year, month)
         # Delete base rows so ensure_original rebuilds
-        from database import get_connection
+        from database import connection
 
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
+        with connection() as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 "SELECT id FROM schedule_snapshots WHERE year=? AND month=? AND schedule_type='base'",
                 (year, month),
@@ -483,8 +479,6 @@ def implement_optimized_plan(
                 cursor.execute("DELETE FROM schedule_snapshot_rows WHERE snapshot_id=?", (row["id"],))
                 cursor.execute("DELETE FROM schedule_snapshots WHERE id=?", (row["id"],))
             conn.commit()
-        finally:
-            conn.close()
 
     from logic.snapshots import ensure_original_monthly_schedule
 

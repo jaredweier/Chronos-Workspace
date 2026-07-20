@@ -10,7 +10,7 @@ from config import (
     HOLIDAY_ANNUAL_HOURS,
     SICK_MONTHLY_ACCRUAL_HOURS,
 )
-from database import get_connection
+from database import connection
 
 
 def _ensure_officer_time_banks(cursor, officer_id: int, as_of: date) -> Dict:
@@ -95,32 +95,30 @@ def bulk_adjust_pay_rates(
     if percent_change == 0 and flat_amount == 0:
         return {"success": False, "message": "Provide a percent change or flat amount"}
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        if squad in ("A", "B"):
-            cursor.execute(
-                """
-                UPDATE officers
-                SET pay_rate = ROUND(pay_rate * ? + ?, 2)
-                WHERE active = 1 AND squad = ?
-            """,
-                (1 + percent_change / 100, flat_amount, squad),
-            )
-        else:
-            cursor.execute(
-                """
-                UPDATE officers
-                SET pay_rate = ROUND(pay_rate * ? + ?, 2)
-                WHERE active = 1
-            """,
-                (1 + percent_change / 100, flat_amount),
-            )
-        updated = cursor.rowcount
-        conn.commit()
-        return {"success": True, "updated": updated, "message": f"Updated pay rates for {updated} officer(s)"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            if squad in ("A", "B"):
+                cursor.execute(
+                    """
+                    UPDATE officers
+                    SET pay_rate = ROUND(pay_rate * ? + ?, 2)
+                    WHERE active = 1 AND squad = ?
+                """,
+                    (1 + percent_change / 100, flat_amount, squad),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE officers
+                    SET pay_rate = ROUND(pay_rate * ? + ?, 2)
+                    WHERE active = 1
+                """,
+                    (1 + percent_change / 100, flat_amount),
+                )
+            updated = cursor.rowcount
+            conn.commit()
+            return {"success": True, "updated": updated, "message": f"Updated pay rates for {updated} officer(s)"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}

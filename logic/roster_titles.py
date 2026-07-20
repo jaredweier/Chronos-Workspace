@@ -5,7 +5,7 @@ import re
 from typing import Dict, List, Optional
 
 from config import OFFICER_TITLE_ALIASES, OFFICER_TITLE_OPTIONS
-from database import get_connection
+from database import connection
 from logic.operations import get_department_setting, set_department_setting
 from logic.users import log_audit_action
 
@@ -36,17 +36,16 @@ def get_custom_officer_titles() -> List[str]:
 
 def get_titles_in_use_on_roster() -> List[str]:
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT DISTINCT job_title FROM officers
-            WHERE job_title IS NOT NULL AND TRIM(job_title) != ''
-            ORDER BY job_title
-            """
-        )
-        rows = [row["job_title"] for row in cursor.fetchall()]
-        conn.close()
+        with connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT job_title FROM officers
+                WHERE job_title IS NOT NULL AND TRIM(job_title) != ''
+                ORDER BY job_title
+                """
+            )
+            rows = [row["job_title"] for row in cursor.fetchall()]
         return rows
     except Exception:
         return []

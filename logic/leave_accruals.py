@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Dict, Optional
 
-from database import get_connection
+from database import connection
 from logic.operations import get_department_setting, set_department_setting
 from logic.users import log_audit_action
 from validators import parse_date, storage_date
@@ -57,9 +57,8 @@ def get_officer_accrual_balances(officer_id: int, *, as_of: Optional[date] = Non
     from logic.payroll.banks import _ensure_officer_time_banks
 
     ref = as_of or date.today()
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
+    with connection() as conn:
+        cursor = conn.cursor()
         banks = _ensure_officer_time_banks(cursor, int(officer_id), ref)
         conn.commit()
         return {
@@ -72,8 +71,6 @@ def get_officer_accrual_balances(officer_id: int, *, as_of: Optional[date] = Non
             "holiday_hours": float(banks.get("holiday_hours") or 0),
             "banks": dict(banks),
         }
-    finally:
-        conn.close()
 
 
 def list_roster_accrual_balances(*, as_of: Optional[date] = None) -> Dict[str, Any]:
@@ -139,83 +136,82 @@ def deduct_leave_accrual(
 
     from logic.payroll.banks import _ensure_officer_time_banks
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        banks = _ensure_officer_time_banks(cursor, int(officer_id), parse_date(request_date))
-        current = float(banks.get(bank_col) or 0)
-        if current < hrs and not allow_negative:
-            return {
-                "success": False,
-                "message": f"Insufficient {bank_col.replace('_', ' ')}: have {current:g}h, need {hrs:g}h",
-                "balance": current,
-                "needed": hrs,
-                "bank": bank_col,
-            }
-        new_bal = current - hrs
-        cursor.execute(
-            f"UPDATE officer_time_banks SET {bank_col} = ? WHERE officer_id = ?",
-            (new_bal, int(officer_id)),
-        )
-        # Ledger row if bank transactions table exists — optional
+    with connection() as conn:
+        cursor = conn.cursor()
         try:
+            banks = _ensure_officer_time_banks(cursor, int(officer_id), parse_date(request_date))
+            current = float(banks.get(bank_col) or 0)
+            if current < hrs and not allow_negative:
+                return {
+                    "success": False,
+                    "message": f"Insufficient {bank_col.replace('_', ' ')}: have {current:g}h, need {hrs:g}h",
+                    "balance": current,
+                    "needed": hrs,
+                    "bank": bank_col,
+                }
+            new_bal = current - hrs
             cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS leave_accrual_ledger (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    officer_id INTEGER NOT NULL,
-                    request_id INTEGER,
-                    request_type TEXT,
-                    request_date TEXT,
-                    bank_column TEXT,
-                    hours REAL,
-                    balance_after REAL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_by_user_id INTEGER
+                f"UPDATE officer_time_banks SET {bank_col} = ? WHERE officer_id = ?",
+                (new_bal, int(officer_id)),
+            )
+            # Ledger row if bank transactions table exists — optional
+            try:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS leave_accrual_ledger (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        officer_id INTEGER NOT NULL,
+                        request_id INTEGER,
+                        request_type TEXT,
+                        request_date TEXT,
+                        bank_column TEXT,
+                        hours REAL,
+                        balance_after REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by_user_id INTEGER
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                INSERT INTO leave_accrual_ledger
-                (officer_id, request_id, request_type, request_date, bank_column, hours, balance_after, created_by_user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(officer_id),
-                    request_id,
-                    rtype,
-                    storage_date(parse_date(request_date)),
-                    bank_col,
-                    -hrs,
-                    new_bal,
+                cursor.execute(
+                    """
+                    INSERT INTO leave_accrual_ledger
+                    (officer_id, request_id, request_type, request_date, bank_column, hours, balance_after,
+                     created_by_user_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(officer_id),
+                        request_id,
+                        rtype,
+                        storage_date(parse_date(request_date)),
+                        bank_col,
+                        -hrs,
+                        new_bal,
+                        user_id,
+                    ),
+                )
+            except Exception:
+                pass
+            conn.commit()
+            if user_id is not None:
+                log_audit_action(
                     user_id,
-                ),
-            )
-        except Exception:
-            pass
-        conn.commit()
-        if user_id is not None:
-            log_audit_action(
-                user_id,
-                "leave_accrual_deduct",
-                "officer_time_banks",
-                int(officer_id),
-                f"{rtype} -{hrs:g}h → {bank_col}={new_bal:g}",
-            )
-        return {
-            "success": True,
-            "officer_id": int(officer_id),
-            "bank": bank_col,
-            "hours_deducted": hrs,
-            "balance_after": new_bal,
-            "message": f"Deducted {hrs:g}h from {bank_col.replace('_', ' ')} (now {new_bal:g}h)",
-        }
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+                    "leave_accrual_deduct",
+                    "officer_time_banks",
+                    int(officer_id),
+                    f"{rtype} -{hrs:g}h → {bank_col}={new_bal:g}",
+                )
+            return {
+                "success": True,
+                "officer_id": int(officer_id),
+                "bank": bank_col,
+                "hours_deducted": hrs,
+                "balance_after": new_bal,
+                "message": f"Deducted {hrs:g}h from {bank_col.replace('_', ' ')} (now {new_bal:g}h)",
+            }
+        except Exception as exc:
+            conn.rollback()
+            return {"success": False, "message": str(exc)}
 
 
 def maybe_deduct_on_day_off_approve(

@@ -11,7 +11,7 @@ from datetime import date
 from typing import Dict, List, Optional, Set, Tuple
 
 from config import is_high_risk_night
-from database import get_connection
+from database import connection
 from logic import rust_bridge, rust_fallback
 from logic.officers import get_officer_by_id, get_officers_by_seniority
 from logic.rotation_config import (
@@ -135,38 +135,39 @@ def _load_override_maps_for_range(
     """Return bumped/covering/swapped maps and per-day bumped schedule statuses."""
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT override_date, original_officer_id, replacement_officer_id, reason
-        FROM schedule_overrides
-        WHERE override_date >= ? AND override_date <= ?
-    """,
-        (start_str, end_str),
-    )
     bumped_by_date: Dict[str, Set[int]] = {}
     covering_by_date: Dict[str, Set[int]] = {}
     swapped_by_date: Dict[str, Set[int]] = {}
     bumped_status_by_date: Dict[str, Dict[int, str]] = {}
-    for row in cursor.fetchall():
-        day_key = row["override_date"]
-        original_id = row["original_officer_id"]
-        replacement_id = row["replacement_officer_id"]
-        if row["reason"] == "Shift Swap":
-            swapped_by_date.setdefault(day_key, set()).add(original_id)
-            if replacement_id:
-                swapped_by_date.setdefault(day_key, set()).add(replacement_id)
-            continue
-        if row["reason"] == "Shift Bid Award":
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT override_date, original_officer_id, replacement_officer_id, reason
+            FROM schedule_overrides
+            WHERE override_date >= ? AND override_date <= ?
+        """,
+            (start_str, end_str),
+        )
+        for row in cursor.fetchall():
+            day_key = row["override_date"]
+            original_id = row["original_officer_id"]
+            replacement_id = row["replacement_officer_id"]
+            if row["reason"] == "Shift Swap":
+                swapped_by_date.setdefault(day_key, set()).add(original_id)
+                if replacement_id:
+                    swapped_by_date.setdefault(day_key, set()).add(replacement_id)
+                continue
+            if row["reason"] == "Shift Bid Award":
+                if replacement_id:
+                    covering_by_date.setdefault(day_key, set()).add(replacement_id)
+                continue
+            bumped_by_date.setdefault(day_key, set()).add(original_id)
+            bumped_status_by_date.setdefault(day_key, {})[original_id] = _schedule_status_for_override_reason(
+                row["reason"]
+            )
             if replacement_id:
                 covering_by_date.setdefault(day_key, set()).add(replacement_id)
-            continue
-        bumped_by_date.setdefault(day_key, set()).add(original_id)
-        bumped_status_by_date.setdefault(day_key, {})[original_id] = _schedule_status_for_override_reason(row["reason"])
-        if replacement_id:
-            covering_by_date.setdefault(day_key, set()).add(replacement_id)
-    conn.close()
     return bumped_by_date, covering_by_date, swapped_by_date, bumped_status_by_date
 
 
@@ -316,26 +317,25 @@ def _load_covering_shift_starts_for_range(start_date: date, end_date: date) -> D
     """Date -> replacement_officer_id -> covered_shift_start for rest/compliance math."""
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT override_date, replacement_officer_id, covered_shift_start
-        FROM schedule_overrides
-        WHERE override_date >= ? AND override_date <= ?
-          AND replacement_officer_id IS NOT NULL
-          AND covered_shift_start IS NOT NULL
-        """,
-        (start_str, end_str),
-    )
     out: Dict[str, Dict[int, str]] = {}
-    for row in cursor.fetchall():
-        day_key = row["override_date"]
-        repl_id = row["replacement_officer_id"]
-        covered = row["covered_shift_start"]
-        if repl_id is not None and covered:
-            out.setdefault(day_key, {})[repl_id] = covered
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT override_date, replacement_officer_id, covered_shift_start
+            FROM schedule_overrides
+            WHERE override_date >= ? AND override_date <= ?
+              AND replacement_officer_id IS NOT NULL
+              AND covered_shift_start IS NOT NULL
+            """,
+            (start_str, end_str),
+        )
+        for row in cursor.fetchall():
+            day_key = row["override_date"]
+            repl_id = row["replacement_officer_id"]
+            covered = row["covered_shift_start"]
+            if repl_id is not None and covered:
+                out.setdefault(day_key, {})[repl_id] = covered
     return out
 
 
@@ -349,18 +349,17 @@ def get_officer_effective_shift_band(officer_id: int, target_date: date) -> Opti
     shift_start = officer["shift_start"]
     shift_end = officer["shift_end"]
     if status == "covering":
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT covered_shift_start FROM schedule_overrides
-            WHERE override_date = ? AND replacement_officer_id = ?
-            LIMIT 1
-        """,
-            (target_date.isoformat(), officer_id),
-        )
-        row = cursor.fetchone()
-        conn.close()
+        with connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT covered_shift_start FROM schedule_overrides
+                WHERE override_date = ? AND replacement_officer_id = ?
+                LIMIT 1
+            """,
+                (target_date.isoformat(), officer_id),
+            )
+            row = cursor.fetchone()
         if row and row["covered_shift_start"]:
             shift_start = row["covered_shift_start"]
             shift_end = _scheduling().shift_end_for_start_active(shift_start)

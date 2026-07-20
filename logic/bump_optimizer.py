@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import config
 from config import is_high_risk_night
-from database import get_connection
+from database import connection
 from logic import rust_bridge
 from logic.officers import get_officer_by_id, get_officers_by_seniority
 from logic.rotation_config import (
@@ -48,20 +48,19 @@ def _bump_assignment_counts_for_date(
     request_date: str,
     planning_counts: Optional[Dict[int, int]] = None,
 ) -> Dict[int, int]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT replacement_officer_id FROM schedule_overrides
-        WHERE override_date = ? AND replacement_officer_id IS NOT NULL
-    """,
-        (request_date,),
-    )
-    counts: Dict[int, int] = {}
-    for row in cursor.fetchall():
-        rid = row["replacement_officer_id"]
-        counts[rid] = counts.get(rid, 0) + 1
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT replacement_officer_id FROM schedule_overrides
+            WHERE override_date = ? AND replacement_officer_id IS NOT NULL
+        """,
+            (request_date,),
+        )
+        counts: Dict[int, int] = {}
+        for row in cursor.fetchall():
+            rid = row["replacement_officer_id"]
+            counts[rid] = counts.get(rid, 0) + 1
     for officer_id, extra in (planning_counts or {}).items():
         counts[officer_id] = counts.get(officer_id, 0) + extra
     return counts
@@ -223,29 +222,28 @@ def suggest_bump_chain(
     """Suggest a complete bump chain with step-by-step coverage detail."""
     req_date = parse_date(request_date)
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM officers WHERE active = 1 ORDER BY id ASC",
-    )
-    officers = [dict(row) for row in cursor.fetchall()]
-    cursor.execute(
-        """
-        SELECT original_officer_id, replacement_officer_id, reason
-        FROM schedule_overrides WHERE override_date = ?
-        """,
-        (request_date,),
-    )
-    overrides_on_date = [
-        (
-            row["original_officer_id"],
-            row["replacement_officer_id"],
-            None,
-            row["reason"] or "",
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM officers WHERE active = 1 ORDER BY id ASC",
         )
-        for row in cursor.fetchall()
-    ]
-    conn.close()
+        officers = [dict(row) for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT original_officer_id, replacement_officer_id, reason
+            FROM schedule_overrides WHERE override_date = ?
+            """,
+            (request_date,),
+        )
+        overrides_on_date = [
+            (
+                row["original_officer_id"],
+                row["replacement_officer_id"],
+                None,
+                row["reason"] or "",
+            )
+            for row in cursor.fetchall()
+        ]
 
     schedule_context = _scheduling().get_generated_schedule_day_context(req_date)
     shift_times = list(get_active_shift_times().values())

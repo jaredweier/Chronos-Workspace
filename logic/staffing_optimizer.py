@@ -122,7 +122,14 @@ def _snap_to_half_hour(label: str) -> str:
     return _format_hhmm(total // 60, total % 60)
 
 
-def generate_start_packs(shift_length_hours: float, *, max_packs: int = 1000, num_officers: int = 6) -> List[List[str]]:
+def generate_start_packs(
+    shift_length_hours: float,
+    *,
+    max_packs: int = 1000,
+    num_officers: int = 6,
+    max_bands: Optional[int] = None,
+    min_bands: int = 2,
+) -> List[List[str]]:
     import itertools
 
     packs: List[List[str]] = []
@@ -168,7 +175,6 @@ def generate_start_packs(shift_length_hours: float, *, max_packs: int = 1000, nu
     # Equal-spaced bands generated FIRST so they are never crowded out by the
     # combinatorial section hitting max_packs.  These are the most analytically
     # sound packs for coverage analysis.
-    length = float(shift_length_hours)
     anchors = ["05:00", "06:00", "07:00", "18:00", "19:00"]
     for spacing_h in [6, 8, 12]:
         spacing_min = spacing_h * 60
@@ -184,11 +190,17 @@ def generate_start_packs(shift_length_hours: float, *, max_packs: int = 1000, nu
             except Exception:
                 pass
 
-    # For larger departments allow more distinct bands (up to 6 for N>=8).
-    max_combos = min(max(2, num_officers), 6)
+    # Prefer explicit max_bands; else HEAD-style cap by roster size (≤6).
+    if max_bands is None:
+        max_combos = min(max(2, int(num_officers or 2)), 6)
+    else:
+        max_combos = min(max(int(min_bands or 2), int(max_bands)), 8)
+    min_k = max(2, int(min_bands or 2))
+    if min_k > max_combos:
+        max_combos = min_k
 
-    # Add 2-band through max_combos-band combinations from core_starts
-    for k in range(2, max_combos + 1):
+    # Add min_k through max_combos-band combinations from core_starts
+    for k in range(min_k, max_combos + 1):
         for combo in itertools.combinations(core_starts, k):
             _add(combo)
             if len(packs) >= max_packs:
@@ -955,6 +967,12 @@ def estimate_search_space(
     free_lengths: bool = False,
     free_variations: bool = False,
     stagger_phases: bool = True,
+    annual_hours_hard: bool = False,
+    annual_hours_target: Optional[float] = None,
+    annual_hours_variance: float = 0.0,
+    coverage_247: int = 0,
+    use_extra_windows: bool = False,
+    extra_windows: Optional[List[Dict]] = None,
     **_ignored,
 ) -> Dict:
     """
@@ -1012,12 +1030,13 @@ def estimate_search_space(
 
     # Cache generate_start_packs length by shift length to avoid re-running the
     # combinatorial generator for every (n_off, length) pair in the estimate loop.
-    _pack_len_cache: Dict[float, int] = {}
+    _pack_len_cache: Dict[Tuple[float, int, int], int] = {}
 
-    def _pack_count(L: float) -> int:
-        if L not in _pack_len_cache:
-            _pack_len_cache[L] = len(generate_start_packs(float(L)))
-        return _pack_len_cache[L]
+    def _pack_count(L: float, min_b: int, max_b: int) -> int:
+        key = (L, min_b, max_b)
+        if key not in _pack_len_cache:
+            _pack_len_cache[key] = len(generate_start_packs(float(L), min_bands=min_b, max_bands=max_b))
+        return _pack_len_cache[key]
 
     n_rot_valid = 0
     for rotation in axes["rotation_types"]:
@@ -1037,12 +1056,38 @@ def estimate_search_space(
                 except ValueError:
                     continue
             for n_off in axes["officer_counts"]:
+                from logic.optimizer_features import early_impossible_proof
+
                 inner = _inner_count(int(n_off), cycle, n_pat, bool(variations))
+                max_b = min(6, max(2, int(n_off)))
                 for length in axes["length_opts"]:
+                    min_b = 2
+                    if coverage_247 > 0:
+                        import math
+
+                        min_b = max(min_b, math.ceil(24.0 / float(length)))
+                    if min_b > max_b:
+                        max_b = min_b
+                    if annual_hours_hard or coverage_247 > 0 or use_extra_windows:
+                        win_min = _window_body_floor(extra_windows, use_windows=use_extra_windows)
+                        reason = early_impossible_proof(
+                            num_officers=int(n_off),
+                            shift_length_hours=float(length),
+                            annual_hours_target=float(annual_hours_target or 2080.0),
+                            annual_hours_variance=float(annual_hours_variance),
+                            annual_hours_hard=bool(annual_hours_hard),
+                            rotation_variations=variations,
+                            coverage_247=int(coverage_247 or 0),
+                            window_min=win_min,
+                            rotation_style=axes["style"],
+                        )
+                        if reason:
+                            continue
+
                     if axes["locked_starts_opts"] is not None:
                         n_starts = len(axes["locked_starts_opts"])
                     else:
-                        n_starts = _pack_count(float(length))
+                        n_starts = _pack_count(float(length), min_b, max_b)
                     for _min_ps in axes["min_per_shift_options"]:
                         outer += n_starts
                         total += n_starts * inner
@@ -1073,11 +1118,17 @@ def estimate_search_space(
 
     warning = ""
     if risk in ("high", "extreme"):
+        locks_needed = [d for d in ("officer_count", "shift_starts", "shift_length") if d in axes["free_dims"]]
+        suggestion = (
+            f"Lock {', '.join(locks_needed).replace('_', ' ')} to shrink the space."
+            if locks_needed
+            else "Lock more constraints to shrink the space."
+        )
         warning = (
             f"With current free dimensions ({', '.join(axes['free_dims']) or 'none'}), "
             f"about {total:,} layouts must be checked. "
             f"Expected time {_fmt_time(est_sec)}. "
-            "Select more constraints (lock officer count, shift starts, or length) to shrink the space."
+            f"{suggestion}"
         )
     elif risk == "medium":
         warning = (
@@ -1498,12 +1549,27 @@ def optimize_staffing_scenarios(
                     continue
 
             for n_off in ordered_n:
+                # Max distinct start bands ≈ roster size (not work_frac×N — that under-capped packs).
+                max_b = min(6, max(2, int(n_off)))
                 for min_ps in axes["min_per_shift_options"]:
                     for length in axes["length_opts"]:
+                        min_b = 2
+                        if cov247 > 0:
+                            import math
+
+                            min_b = max(min_b, math.ceil(24.0 / float(length)))
+                        if min_b > max_b:
+                            max_b = min_b
+
                         if axes["locked_starts_opts"] is not None:
                             starts_opts = axes["locked_starts_opts"]
                         else:
-                            starts_opts = generate_start_packs(float(length), num_officers=n_off)
+                            starts_opts = generate_start_packs(
+                                float(length),
+                                num_officers=int(n_off),
+                                min_bands=min_b,
+                                max_bands=max_b,
+                            )
 
                         # _starts_priority defined here (not inside loop) to avoid
                         # unnecessary per-iteration closure allocation.
@@ -1534,11 +1600,15 @@ def optimize_staffing_scenarios(
 
                         if axes["locked_starts_opts"] is None and len(starts_opts) > 1:
                             starts_opts = sorted(starts_opts, key=_starts_priority)
+                            # Free-starts can emit max_packs (1000). Hard mode only needs
+                            # priority-sorted head — full 1k×phase grid is multi-hour hang.
+                            if require_hard_ok and len(starts_opts) > 48:
+                                starts_opts = starts_opts[:48]
 
                         # Explore multiple start packs (diverse options), not one pack only.
                         max_hard_results = 24
                         max_unique_start_packs = 8
-                        found_hard_for_n = False
+                        exhaustive_packs_left = 2  # phase×pattern grid only for a few misses
 
                         def _unique_packs() -> int:
                             return len(
@@ -1571,6 +1641,7 @@ def optimize_staffing_scenarios(
                                 continue
                             outer_configs += 1
                             n_bands = max(1, len(starts))
+                            hard_ok_this_pack = False
 
                             if parsed_patterns and stagger_phases:
                                 # Priority phases first (fast); expand to full if no hard-OK.
@@ -1664,7 +1735,7 @@ def optimize_staffing_scenarios(
                                     max_consecutive_work_days=int(max_consecutive_work_days),
                                 ):
                                     results.append(row)
-                                    found_hard_for_n = True
+                                    hard_ok_this_pack = True
                                     # Keep scanning more packs/phases for alternate options
                                     if len(results) >= max_hard_results:
                                         break
@@ -1676,6 +1747,12 @@ def optimize_staffing_scenarios(
 
                             if require_hard_ok and len(results) >= max_hard_results:
                                 continue
+                            # Fast path hard-OK this pack, already have hard results, or
+                            # exhaustive budget spent → skip phase×pattern cheap grid.
+                            if require_hard_ok and (hard_ok_this_pack or results or exhaustive_packs_left <= 0):
+                                continue
+                            if require_hard_ok:
+                                exhaustive_packs_left -= 1
 
                             # Exhaustive cheap scan of entire phase×pattern model (no eval cap).
                             # Full-sim: all cheap-pass in best-first order until hard-OK, then
@@ -1947,7 +2024,6 @@ def optimize_staffing_scenarios(
                                             best_miss_row = row
                                         continue
                                     results.append(row)
-                                    found_hard_for_n = True
                                     if found_hard_structural:
                                         rank_pool_remaining -= 1
                                     else:
@@ -2126,7 +2202,6 @@ def optimize_staffing_scenarios(
                                                 best_miss_row = row
                                             continue
                                         results.append(row)
-                                        found_hard_for_n = True
                                         if found_hard_structural:
                                             rank_pool_remaining -= 1
                                         else:

@@ -13,7 +13,7 @@ from config import (
     TIMECARD_ENTRY_TYPES,
     TIMECARD_REGULAR_TYPE,
 )
-from database import get_connection
+from database import connection
 from logic.officers import get_officer_by_id, get_officers_by_seniority
 from logic.payroll.period import (
     get_adjacent_pay_period,
@@ -41,20 +41,19 @@ _TIMECARD_WORKING_STATUSES = frozenset({"working", "covering", "swapped", "train
 
 
 def _approved_day_off_request_type(officer_id: int, target_date: date) -> Optional[str]:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT request_type FROM day_off_requests
-        WHERE officer_id = ? AND request_date = ? AND status = 'Approved'
-        ORDER BY processed_at DESC, id DESC
-        LIMIT 1
-    """,
-        (officer_id, target_date.isoformat()),
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return row["request_type"] if row else None
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT request_type FROM day_off_requests
+            WHERE officer_id = ? AND request_date = ? AND status = 'Approved'
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+        """,
+            (officer_id, target_date.isoformat()),
+        )
+        row = cursor.fetchone()
+        return row["request_type"] if row else None
 
 
 def _timecard_defaults_for_schedule_status(
@@ -157,19 +156,18 @@ def get_officer_live_schedule_day(officer_id: int, target_date: date) -> Dict:
 
 def get_timecard_approval(officer_id: int, period_start: Optional[date] = None) -> Dict:
     start, _ = get_pay_period(period_start)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT ta.*, u.username AS approved_by_username
-        FROM timecard_approvals ta
-        LEFT JOIN app_users u ON ta.approved_by_user_id = u.id
-        WHERE ta.officer_id = ? AND ta.pay_period_start = ?
-    """,
-        (officer_id, start.isoformat()),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT ta.*, u.username AS approved_by_username
+            FROM timecard_approvals ta
+            LEFT JOIN app_users u ON ta.approved_by_user_id = u.id
+            WHERE ta.officer_id = ? AND ta.pay_period_start = ?
+        """,
+            (officer_id, start.isoformat()),
+        )
+        row = cursor.fetchone()
     if not row:
         return {
             "officer_id": officer_id,
@@ -183,29 +181,28 @@ def list_timecard_approvals_for_period(period_start: Optional[date] = None) -> D
     start, end = get_pay_period(period_start)
     start_str = start.isoformat()
     officers = [o for o in get_officers_by_seniority() if o.get("active") == 1]
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT officer_id, status, submitted_at, approved_at, supervisor_notes
-        FROM timecard_approvals
-        WHERE pay_period_start = ?
-    """,
-        (start_str,),
-    )
-    by_officer = {row["officer_id"]: dict(row) for row in cursor.fetchall()}
-    cursor.execute(
-        """
-        SELECT officer_id, COALESCE(SUM(hours_worked), 0) AS total_hours,
-               COUNT(*) AS line_count
-        FROM timecard_entries
-        WHERE pay_period_start = ?
-        GROUP BY officer_id
-    """,
-        (start_str,),
-    )
-    hours_by_officer = {row["officer_id"]: dict(row) for row in cursor.fetchall()}
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT officer_id, status, submitted_at, approved_at, supervisor_notes
+            FROM timecard_approvals
+            WHERE pay_period_start = ?
+        """,
+            (start_str,),
+        )
+        by_officer = {row["officer_id"]: dict(row) for row in cursor.fetchall()}
+        cursor.execute(
+            """
+            SELECT officer_id, COALESCE(SUM(hours_worked), 0) AS total_hours,
+                   COUNT(*) AS line_count
+            FROM timecard_entries
+            WHERE pay_period_start = ?
+            GROUP BY officer_id
+        """,
+            (start_str,),
+        )
+        hours_by_officer = {row["officer_id"]: dict(row) for row in cursor.fetchall()}
 
     rows = []
     for officer in officers:
@@ -245,66 +242,64 @@ def _upsert_timecard_approval(
         return {"success": False, "message": f"Invalid approval status: {status}"}
 
     start_str = period_start.isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT id, status FROM timecard_approvals
-            WHERE officer_id = ? AND pay_period_start = ?
-        """,
-            (officer_id, start_str),
-        )
-        existing = cursor.fetchone()
-        if existing:
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
             cursor.execute(
                 """
-                UPDATE timecard_approvals
-                SET status = ?, supervisor_notes = COALESCE(?, supervisor_notes),
-                    submitted_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE submitted_at END,
-                    approved_by_user_id = CASE WHEN ? THEN ? ELSE approved_by_user_id END,
-                    approved_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE approved_at END,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SELECT id, status FROM timecard_approvals
+                WHERE officer_id = ? AND pay_period_start = ?
             """,
-                (
-                    status,
-                    supervisor_notes,
-                    1 if mark_submitted else 0,
-                    1 if mark_approved else 0,
-                    user_id,
-                    1 if mark_approved else 0,
-                    existing["id"],
-                ),
+                (officer_id, start_str),
             )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO timecard_approvals
-                (officer_id, pay_period_start, status, submitted_at,
-                 approved_by_user_id, approved_at, supervisor_notes)
-                VALUES (?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
-                        CASE WHEN ? THEN ? ELSE NULL END,
-                        CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END, ?)
-            """,
-                (
-                    officer_id,
-                    start_str,
-                    status,
-                    1 if mark_submitted else 0,
-                    1 if mark_approved else 0,
-                    user_id,
-                    1 if mark_approved else 0,
-                    supervisor_notes,
-                ),
-            )
-        conn.commit()
-        return {"success": True, "status": status}
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    """
+                    UPDATE timecard_approvals
+                    SET status = ?, supervisor_notes = COALESCE(?, supervisor_notes),
+                        submitted_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE submitted_at END,
+                        approved_by_user_id = CASE WHEN ? THEN ? ELSE approved_by_user_id END,
+                        approved_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE approved_at END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """,
+                    (
+                        status,
+                        supervisor_notes,
+                        1 if mark_submitted else 0,
+                        1 if mark_approved else 0,
+                        user_id,
+                        1 if mark_approved else 0,
+                        existing["id"],
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO timecard_approvals
+                    (officer_id, pay_period_start, status, submitted_at,
+                     approved_by_user_id, approved_at, supervisor_notes)
+                    VALUES (?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
+                            CASE WHEN ? THEN ? ELSE NULL END,
+                            CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END, ?)
+                """,
+                    (
+                        officer_id,
+                        start_str,
+                        status,
+                        1 if mark_submitted else 0,
+                        1 if mark_approved else 0,
+                        user_id,
+                        1 if mark_approved else 0,
+                        supervisor_notes,
+                    ),
+                )
+            conn.commit()
+            return {"success": True, "status": status}
+        except Exception as exc:
+            conn.rollback()
+            return {"success": False, "message": str(exc)}
 
 
 def submit_timecard_for_approval(
@@ -443,78 +438,76 @@ def save_timecard_entry(
         }
     pay_start_str = pay_start.isoformat()
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        if timecard_id is not None:
-            cursor.execute(
-                """
-                SELECT id, payroll_entry_id FROM timecard_entries
-                WHERE id = ? AND officer_id = ?
-            """,
-                (timecard_id, officer_id),
-            )
-            existing = cursor.fetchone()
-            if not existing:
-                return {"success": False, "message": "Timecard entry not found"}
-            if existing["payroll_entry_id"]:
-                return {"success": False, "message": "Entry already imported to payroll — cannot edit"}
-            cursor.execute(
-                """
-                UPDATE timecard_entries
-                SET pay_period_start = ?, entry_date = ?, hours_worked = ?, time_in = ?, time_out = ?,
-                    entry_type = ?, night_diff_hours = ?, notes = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """,
-                (
-                    pay_start_str,
-                    entry_date,
-                    hours_worked,
-                    time_in or None,
-                    time_out or None,
-                    entry_type,
-                    night_diff_hours,
-                    notes or None,
-                    timecard_id,
-                ),
-            )
-            entry_id = timecard_id
-        else:
-            cursor.execute(
-                """
-                INSERT INTO timecard_entries
-                (officer_id, pay_period_start, entry_date, hours_worked, time_in, time_out,
-                 entry_type, night_diff_hours, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    officer_id,
-                    pay_start_str,
-                    entry_date,
-                    hours_worked,
-                    time_in or None,
-                    time_out or None,
-                    entry_type,
-                    night_diff_hours,
-                    notes or None,
-                ),
-            )
-            entry_id = cursor.lastrowid
-        conn.commit()
-        result = {"success": True, "timecard_id": entry_id}
-        if is_overnight_shift(time_in, time_out):
-            result["overnight"] = True
-            result["message"] = (
-                f"Overnight shift saved — all hours count in pay period "
-                f"{format_date(pay_start)} – {format_date(pay_end)} (shift start date)"
-            )
-        return result
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            if timecard_id is not None:
+                cursor.execute(
+                    """
+                    SELECT id, payroll_entry_id FROM timecard_entries
+                    WHERE id = ? AND officer_id = ?
+                """,
+                    (timecard_id, officer_id),
+                )
+                existing = cursor.fetchone()
+                if not existing:
+                    return {"success": False, "message": "Timecard entry not found"}
+                if existing["payroll_entry_id"]:
+                    return {"success": False, "message": "Entry already imported to payroll — cannot edit"}
+                cursor.execute(
+                    """
+                    UPDATE timecard_entries
+                    SET pay_period_start = ?, entry_date = ?, hours_worked = ?, time_in = ?, time_out = ?,
+                        entry_type = ?, night_diff_hours = ?, notes = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """,
+                    (
+                        pay_start_str,
+                        entry_date,
+                        hours_worked,
+                        time_in or None,
+                        time_out or None,
+                        entry_type,
+                        night_diff_hours,
+                        notes or None,
+                        timecard_id,
+                    ),
+                )
+                entry_id = timecard_id
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO timecard_entries
+                    (officer_id, pay_period_start, entry_date, hours_worked, time_in, time_out,
+                     entry_type, night_diff_hours, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        officer_id,
+                        pay_start_str,
+                        entry_date,
+                        hours_worked,
+                        time_in or None,
+                        time_out or None,
+                        entry_type,
+                        night_diff_hours,
+                        notes or None,
+                    ),
+                )
+                entry_id = cursor.lastrowid
+            conn.commit()
+            result = {"success": True, "timecard_id": entry_id}
+            if is_overnight_shift(time_in, time_out):
+                result["overnight"] = True
+                result["message"] = (
+                    f"Overnight shift saved — all hours count in pay period "
+                    f"{format_date(pay_start)} – {format_date(pay_end)} (shift start date)"
+                )
+            return result
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def delete_timecard_entry(
@@ -524,37 +517,35 @@ def delete_timecard_entry(
     override_approval: bool = False,
 ) -> Dict:
     """Remove a timecard row (e.g. extra pay-type line on the same day)."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT id, payroll_entry_id, pay_period_start FROM timecard_entries
-            WHERE id = ? AND officer_id = ?
-        """,
-            (timecard_id, officer_id),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return {"success": False, "message": "Timecard entry not found"}
-        if row["payroll_entry_id"]:
-            return {"success": False, "message": "Entry already imported to payroll — cannot delete"}
-        period = parse_date(row["pay_period_start"])
-        if is_pay_period_locked(period):
-            return {"success": False, "message": "Pay period is locked — timecard edits are disabled"}
-        if is_timecard_period_approved(officer_id, period) and not override_approval:
-            return {
-                "success": False,
-                "message": "Timecard approved for this pay period — contact a supervisor to make changes",
-            }
-        cursor.execute("DELETE FROM timecard_entries WHERE id = ?", (timecard_id,))
-        conn.commit()
-        return {"success": True, "message": "Timecard entry removed"}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": str(e)}
-    finally:
-        conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, payroll_entry_id, pay_period_start FROM timecard_entries
+                WHERE id = ? AND officer_id = ?
+            """,
+                (timecard_id, officer_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {"success": False, "message": "Timecard entry not found"}
+            if row["payroll_entry_id"]:
+                return {"success": False, "message": "Entry already imported to payroll — cannot delete"}
+            period = parse_date(row["pay_period_start"])
+            if is_pay_period_locked(period):
+                return {"success": False, "message": "Pay period is locked — timecard edits are disabled"}
+            if is_timecard_period_approved(officer_id, period) and not override_approval:
+                return {
+                    "success": False,
+                    "message": "Timecard approved for this pay period — contact a supervisor to make changes",
+                }
+            cursor.execute("DELETE FROM timecard_entries WHERE id = ?", (timecard_id,))
+            conn.commit()
+            return {"success": True, "message": "Timecard entry removed"}
+        except Exception as e:
+            conn.rollback()
+            return {"success": False, "message": str(e)}
 
 
 def _apply_night_differential(
@@ -581,18 +572,17 @@ def copy_timecard_from_previous_period(
         return {"success": False, "message": "Pay period is locked"}
 
     prev_start, _ = get_adjacent_pay_period(start, -1)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM timecard_entries
-        WHERE officer_id = ? AND pay_period_start = ?
-        ORDER BY entry_date
-    """,
-        (officer_id, prev_start.isoformat()),
-    )
-    prev_rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM timecard_entries
+            WHERE officer_id = ? AND pay_period_start = ?
+            ORDER BY entry_date
+        """,
+            (officer_id, prev_start.isoformat()),
+        )
+        prev_rows = [dict(r) for r in cursor.fetchall()]
 
     if not prev_rows:
         return {"success": False, "message": "No timecard data in previous pay period"}
@@ -606,17 +596,16 @@ def copy_timecard_from_previous_period(
             skipped += 1
             continue
         target_str = target.isoformat()
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT payroll_entry_id FROM timecard_entries
-            WHERE officer_id = ? AND entry_date = ?
-        """,
-            (officer_id, target_str),
-        )
-        existing = cursor.fetchone()
-        conn.close()
+        with connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT payroll_entry_id FROM timecard_entries
+                WHERE officer_id = ? AND entry_date = ?
+            """,
+                (officer_id, target_str),
+            )
+            existing = cursor.fetchone()
         if existing and existing["payroll_entry_id"]:
             skipped += 1
             continue
@@ -688,48 +677,47 @@ def get_pay_period_hours_summary(
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    if officer_id:
-        cursor.execute(
-            """
-            SELECT hours_worked, entry_type, night_diff_hours, payroll_entry_id
-            FROM timecard_entries
-            WHERE pay_period_start = ? AND officer_id = ?
-        """,
-            (start_str, officer_id),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT hours_worked, entry_type, night_diff_hours, payroll_entry_id
-            FROM timecard_entries
-            WHERE pay_period_start = ?
-        """,
-            (start_str,),
-        )
-    timecard_rows = [dict(row) for row in cursor.fetchall()]
+    with connection() as conn:
+        cursor = conn.cursor()
+        if officer_id:
+            cursor.execute(
+                """
+                SELECT hours_worked, entry_type, night_diff_hours, payroll_entry_id
+                FROM timecard_entries
+                WHERE pay_period_start = ? AND officer_id = ?
+            """,
+                (start_str, officer_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT hours_worked, entry_type, night_diff_hours, payroll_entry_id
+                FROM timecard_entries
+                WHERE pay_period_start = ?
+            """,
+                (start_str,),
+            )
+        timecard_rows = [dict(row) for row in cursor.fetchall()]
 
-    if officer_id:
-        cursor.execute(
-            """
-            SELECT id, hours, entry_type, night_differential_hours
-            FROM payroll_entries
-            WHERE officer_id = ? AND pay_period_start = ?
-        """,
-            (officer_id, start_str),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT id, hours, entry_type, night_differential_hours
-            FROM payroll_entries
-            WHERE pay_period_start = ?
-        """,
-            (start_str,),
-        )
-    payroll_rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+        if officer_id:
+            cursor.execute(
+                """
+                SELECT id, hours, entry_type, night_differential_hours
+                FROM payroll_entries
+                WHERE officer_id = ? AND pay_period_start = ?
+            """,
+                (officer_id, start_str),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, hours, entry_type, night_differential_hours
+                FROM payroll_entries
+                WHERE pay_period_start = ?
+            """,
+                (start_str,),
+            )
+        payroll_rows = [dict(row) for row in cursor.fetchall()]
 
     summary = _summarize_pay_period_hours(timecard_rows, payroll_rows)
     result = {
@@ -765,41 +753,40 @@ def get_payroll_period_timesheets(period_start: Optional[date] = None) -> Dict:
     grand_hours = 0.0
     grand_pay = 0.0
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    for officer in officers:
-        cursor.execute(
-            """
-            SELECT * FROM timecard_entries
-            WHERE officer_id = ? AND pay_period_start = ?
-            ORDER BY entry_date
-        """,
-            (officer["id"], start_str),
-        )
-        timecard_rows = [dict(r) for r in cursor.fetchall()]
-        cursor.execute(
-            """
-            SELECT * FROM payroll_entries
-            WHERE officer_id = ? AND pay_period_start = ?
-            ORDER BY entry_date
-        """,
-            (officer["id"], start_str),
-        )
-        payroll_rows = [dict(r) for r in cursor.fetchall()]
-        total_hours = sum(r.get("hours_worked") or 0 for r in timecard_rows)
-        total_pay = sum(r.get("calculated_pay") or 0 for r in payroll_rows)
-        grand_hours += total_hours
-        grand_pay += total_pay
-        sheets.append(
-            {
-                "officer": officer,
-                "total_hours": round(total_hours, 2),
-                "total_pay": round(total_pay, 2),
-                "timecard_rows": timecard_rows,
-                "payroll_rows": payroll_rows,
-            }
-        )
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        for officer in officers:
+            cursor.execute(
+                """
+                SELECT * FROM timecard_entries
+                WHERE officer_id = ? AND pay_period_start = ?
+                ORDER BY entry_date
+            """,
+                (officer["id"], start_str),
+            )
+            timecard_rows = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                """
+                SELECT * FROM payroll_entries
+                WHERE officer_id = ? AND pay_period_start = ?
+                ORDER BY entry_date
+            """,
+                (officer["id"], start_str),
+            )
+            payroll_rows = [dict(r) for r in cursor.fetchall()]
+            total_hours = sum(r.get("hours_worked") or 0 for r in timecard_rows)
+            total_pay = sum(r.get("calculated_pay") or 0 for r in payroll_rows)
+            grand_hours += total_hours
+            grand_pay += total_pay
+            sheets.append(
+                {
+                    "officer": officer,
+                    "total_hours": round(total_hours, 2),
+                    "total_pay": round(total_pay, 2),
+                    "timecard_rows": timecard_rows,
+                    "payroll_rows": payroll_rows,
+                }
+            )
 
     return {
         "success": True,
@@ -821,20 +808,19 @@ def get_timecard_period(
 
     start, end = get_pay_period(period_start)
     start_str = start.isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM timecard_entries
-        WHERE officer_id = ? AND pay_period_start = ?
-        ORDER BY entry_date, id
-    """,
-        (officer_id, start_str),
-    )
-    saved_by_date: Dict[str, List[Dict]] = {}
-    for row in cursor.fetchall():
-        saved_by_date.setdefault(row["entry_date"], []).append(dict(row))
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM timecard_entries
+            WHERE officer_id = ? AND pay_period_start = ?
+            ORDER BY entry_date, id
+        """,
+            (officer_id, start_str),
+        )
+        saved_by_date: Dict[str, List[Dict]] = {}
+        for row in cursor.fetchall():
+            saved_by_date.setdefault(row["entry_date"], []).append(dict(row))
 
     def _entry_payload(row: Dict, scheduled: bool, default_hours: float) -> Dict:
         if "time_in" in row:

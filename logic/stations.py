@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from database import get_connection
+from database import connection
 
 
 def ensure_stations_table() -> None:
-    with get_connection() as conn:
+    with connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS station_posts (
@@ -32,7 +32,7 @@ def list_station_posts(*, active_only: bool = True) -> List[Dict[str, Any]]:
     if active_only:
         sql += " WHERE active = 1"
     sql += " ORDER BY code"
-    with get_connection() as conn:
+    with connection() as conn:
         return [dict(r) for r in conn.execute(sql).fetchall()]
 
 
@@ -53,7 +53,7 @@ def upsert_station_post(
         ms = max(0, int(min_staff))
     except (TypeError, ValueError):
         ms = 1
-    with get_connection() as conn:
+    with connection() as conn:
         existing = conn.execute("SELECT id FROM station_posts WHERE code = ?", (code,)).fetchone()
         if existing:
             conn.execute(
@@ -99,7 +99,7 @@ def get_station_min_staffing_matrix() -> Dict[str, Any]:
 
 
 def officers_by_station() -> Dict[str, Any]:
-    with get_connection() as conn:
+    with connection() as conn:
         rows = conn.execute(
             """
             SELECT COALESCE(NULLIF(TRIM(station), ''), 'UNASSIGNED') AS station,
@@ -127,7 +127,7 @@ def ensure_default_hq_station(*, min_staff: Optional[int] = None) -> Dict[str, A
     # Default min: at least 2 for patrol floor, or 1 for tiny rosters
     n_active = 0
     try:
-        with get_connection() as conn:
+        with connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM officers WHERE active = 1").fetchone()
             n_active = int(row["n"] if row else 0)
     except Exception:
@@ -157,7 +157,7 @@ def assign_unassigned_to_station(
     """
     if only_active:
         sql += " AND active = 1"
-    with get_connection() as conn:
+    with connection() as conn:
         cur = conn.execute(sql, (code,))
         n = int(cur.rowcount or 0)
         conn.commit()
@@ -212,7 +212,7 @@ def bulk_set_station(
     if only_active:
         clauses.append("active = 1")
     where = " AND ".join(clauses)
-    with get_connection() as conn:
+    with connection() as conn:
         cur = conn.execute(f"UPDATE officers SET station = ? WHERE {where}", params)
         n = int(cur.rowcount or 0)
         conn.commit()

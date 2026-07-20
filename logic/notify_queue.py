@@ -11,11 +11,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from database import get_connection
+from database import connection
 
 
 def ensure_notify_outbox_table() -> None:
-    with get_connection() as conn:
+    with connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS notify_outbox (
@@ -57,7 +57,7 @@ def enqueue_notify(
     ch = (channel or "in_app").strip().lower()
     if ch not in ("email", "sms", "in_app", "push", "voice"):
         ch = "email"
-    with get_connection() as conn:
+    with connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO notify_outbox
@@ -97,14 +97,14 @@ def list_notify_outbox(
         params.append(channel)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    with get_connection() as conn:
+    with connection() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
 def notify_outbox_stats() -> Dict[str, Any]:
     ensure_notify_outbox_table()
-    with get_connection() as conn:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT status, channel, COUNT(*) AS n FROM notify_outbox GROUP BY status, channel"
         ).fetchall()
@@ -121,7 +121,7 @@ def notify_outbox_stats() -> Dict[str, Any]:
 
 def _mark_row(row_id: int, *, status: str, error: Optional[str] = None, provider_ref: Optional[str] = None) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    with get_connection() as conn:
+    with connection() as conn:
         conn.execute(
             """
             UPDATE notify_outbox

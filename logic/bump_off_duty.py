@@ -494,20 +494,19 @@ def count_consecutive_days_off(officer_id: int, as_of: date) -> int:
 
 def days_since_last_offduty_cover(officer_id: int, as_of: date) -> int:
     """Days since officer last covered someone else's shift (schedule_overrides)."""
-    from database import get_connection
+    from database import connection
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT MAX(override_date) AS last_d FROM schedule_overrides
-        WHERE replacement_officer_id = ?
-          AND override_date < ?
-        """,
-        (officer_id, as_of.isoformat()),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT MAX(override_date) AS last_d FROM schedule_overrides
+            WHERE replacement_officer_id = ?
+              AND override_date < ?
+            """,
+            (officer_id, as_of.isoformat()),
+        )
+        row = cursor.fetchone()
     if not row or not row["last_d"]:
         return 365  # never called → max fairness
     try:

@@ -90,3 +90,5 @@ tenants/
 
 # Graphify dated extract snapshots (regenerable)
 graphify-out/20*/
+
+test_out.txt

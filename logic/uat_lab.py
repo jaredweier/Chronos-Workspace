@@ -43,7 +43,7 @@ def prepare_uat_lab() -> Dict[str, Any]:
 
 def _ensure_demo_accounts() -> List[str]:
     from auth_password import hash_password
-    from database import get_connection
+    from database import connection
 
     notes: List[str] = []
     wanted = (
@@ -51,57 +51,56 @@ def _ensure_demo_accounts() -> List[str]:
         ("supervisor", "supervisor", "Supervisor"),
         ("officer", "officer", "Officer"),
     )
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        # Link officer to first active roster row when possible
-        cur.execute("SELECT id FROM officers WHERE active = 1 ORDER BY id LIMIT 1")
-        row = cur.fetchone()
-        default_oid = int(row[0]) if row else None
+    with connection() as conn:
+        cur = conn.cursor()
+        try:
+            # Link officer to first active roster row when possible
+            cur.execute("SELECT id FROM officers WHERE active = 1 ORDER BY id LIMIT 1")
+            row = cur.fetchone()
+            default_oid = int(row[0]) if row else None
 
-        for username, password, role in wanted:
-            cur.execute("SELECT id, role FROM app_users WHERE username = ?", (username,))
-            existing = cur.fetchone()
-            if existing:
-                cur.execute(
-                    """
-                    UPDATE app_users
-                    SET password = ?, role = ?, must_change_password = 0, active = 1
-                    WHERE username = ?
-                    """,
-                    (hash_password(password), role, username),
-                )
-                notes.append(f"reset {username} → {role}")
-            else:
-                oid = default_oid if role == "Officer" else None
-                cur.execute(
-                    """
-                    INSERT INTO app_users
-                    (officer_id, username, password, role, must_change_password, active)
-                    VALUES (?, ?, ?, ?, 0, 1)
-                    """,
-                    (oid, username, hash_password(password), role),
-                )
-                notes.append(f"created {username} → {role}")
-        conn.commit()
-    except Exception as exc:
-        conn.rollback()
-        notes.append(f"accounts warn: {exc}")
-    finally:
-        conn.close()
+            for username, password, role in wanted:
+                cur.execute("SELECT id, role FROM app_users WHERE username = ?", (username,))
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute(
+                        """
+                        UPDATE app_users
+                        SET password = ?, role = ?, must_change_password = 0, active = 1
+                        WHERE username = ?
+                        """,
+                        (hash_password(password), role, username),
+                    )
+                    notes.append(f"reset {username} → {role}")
+                else:
+                    oid = default_oid if role == "Officer" else None
+                    cur.execute(
+                        """
+                        INSERT INTO app_users
+                        (officer_id, username, password, role, must_change_password, active)
+                        VALUES (?, ?, ?, ?, 0, 1)
+                        """,
+                        (oid, username, hash_password(password), role),
+                    )
+                    notes.append(f"created {username} → {role}")
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            notes.append(f"accounts warn: {exc}")
     return notes
 
 
 def _clear_must_change_password() -> List[str]:
-    from database import get_connection
+    from database import connection
 
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("UPDATE app_users SET must_change_password = 0 WHERE username IN ('admin','supervisor','officer')")
-        n = cur.rowcount
-        conn.commit()
-        conn.close()
+        with connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE app_users SET must_change_password = 0 WHERE username IN ('admin','supervisor','officer')"
+            )
+            n = cur.rowcount
+            conn.commit()
         return [f"must_change_password cleared n={n}"]
     except Exception as exc:
         return [f"must_change clear warn: {exc}"]

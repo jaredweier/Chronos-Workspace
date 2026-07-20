@@ -154,14 +154,13 @@ def claim_extra_duty_event(
     user_id: Optional[int] = None,
 ) -> Dict:
     """Officer claims an EXTRA_DUTY open shift (marketplace fill)."""
-    from database import get_connection
+    from database import connection
     from logic.operations import fill_open_shift
 
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM open_shifts WHERE id = ?", (int(shift_id),))
-    row = cur.fetchone()
-    conn.close()
+    with connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM open_shifts WHERE id = ?", (int(shift_id),))
+        row = cur.fetchone()
     if not row:
         return {"success": False, "message": "Extra-duty shift not found"}
     shift = dict(row)

@@ -94,34 +94,32 @@ def list_payroll_exceptions(
 
     # Punch edit requests pending
     try:
-        from database import get_connection
+        from database import connection
 
-        conn = get_connection()
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT * FROM punch_edit_requests
-                WHERE status IN ('Pending', 'pending', 'submitted')
-                ORDER BY id DESC LIMIT 100
-                """
-            )
-            for row in cur.fetchall() or []:
-                r = dict(row)
-                items.append(
-                    {
-                        "kind": "punch_correction",
-                        "severity": "warning",
-                        "officer_id": r.get("officer_id"),
-                        "message": f"Punch correction pending #{r.get('id')}",
-                        "ref_id": r.get("id"),
-                        "date": r.get("work_date") or r.get("created_at"),
-                    }
+        with connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT * FROM punch_edit_requests
+                    WHERE status IN ('Pending', 'pending', 'submitted')
+                    ORDER BY id DESC LIMIT 100
+                    """
                 )
-        except Exception:
-            pass
-        finally:
-            conn.close()
+                for row in cur.fetchall() or []:
+                    r = dict(row)
+                    items.append(
+                        {
+                            "kind": "punch_correction",
+                            "severity": "warning",
+                            "officer_id": r.get("officer_id"),
+                            "message": f"Punch correction pending #{r.get('id')}",
+                            "ref_id": r.get("id"),
+                            "date": r.get("work_date") or r.get("created_at"),
+                        }
+                    )
+            except Exception:
+                pass
     except Exception:
         pass
 

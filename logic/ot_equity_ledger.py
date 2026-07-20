@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from database import get_connection
+from database import connection
 
 
 def ensure_ot_equity_tables() -> None:
-    with get_connection() as conn:
+    with connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ot_equity_ledger (
@@ -93,7 +93,7 @@ def _insert(
         return {"success": False, "message": "Invalid officer or hours"}
     if hrs < 0:
         return {"success": False, "message": "Hours must be ≥ 0"}
-    with get_connection() as conn:
+    with connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO ot_equity_ledger
@@ -109,7 +109,7 @@ def _insert(
 def get_ot_equity_summary(*, limit: int = 100) -> Dict[str, Any]:
     """Per-officer offered vs worked totals for fairness boards."""
     ensure_ot_equity_tables()
-    with get_connection() as conn:
+    with connection() as conn:
         rows = conn.execute(
             """
             SELECT e.officer_id,

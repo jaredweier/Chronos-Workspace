@@ -7,11 +7,13 @@ and whether 24/7 + date/time window minima are met.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
+@functools.lru_cache(maxsize=128)
 def _parse_hhmm(value: str) -> int:
     parts = (value or "").strip().split(":")
     if len(parts) < 2:
@@ -19,6 +21,7 @@ def _parse_hhmm(value: str) -> int:
     return int(parts[0]) * 60 + int(parts[1])
 
 
+@functools.lru_cache(maxsize=4096)
 def assignment_intervals(
     work_date: date,
     shift_start: str,
@@ -71,27 +74,38 @@ def min_occupancy_in_range(
     *,
     step_minutes: int = 15,
 ) -> int:
-    """Minimum headcount over [range_start, range_end) sampled every step_minutes."""
+    """Minimum headcount over [range_start, range_end) using sweep line."""
     if range_end <= range_start:
         return 0
-    step = max(1, int(step_minutes))
-    events = build_occupancy_events(assignments)
-    # Sample grid points and event times inside [range_start, range_end)
-    points: List[datetime] = []
-    t = range_start
-    while t < range_end:
-        points.append(t)
-        t += timedelta(minutes=step)
-    for ts, _ in events:
-        if range_start <= ts < range_end:
-            points.append(ts)
-    if not points:
-        return occupancy_at(assignments, range_start)
 
-    # occupancy_at uses half-open intervals — do not seed from pre-range count
-    # (starts exactly at range_start must count as on duty for the window).
-    unique_points = sorted(set(points))
-    return min(occupancy_at(assignments, pt) for pt in unique_points)
+    events = build_occupancy_events(assignments)
+
+    current_occ = 0
+
+    # Compute occupancy exactly at range_start
+    for t, delta in events:
+        if t <= range_start:
+            current_occ += delta
+        else:
+            break
+
+    min_occ = current_occ
+    current_occ = 0
+
+    i = 0
+    n = len(events)
+    while i < n:
+        t = events[i][0]
+        # process all events at time t
+        while i < n and events[i][0] == t:
+            current_occ += events[i][1]
+            i += 1
+
+        if t >= range_start and t < range_end:
+            if current_occ < min_occ:
+                min_occ = current_occ
+
+    return min_occ
 
 
 @dataclass

@@ -10,7 +10,7 @@ from config import (
     PAY_PERIOD_BASE_DATE,
     PAY_PERIOD_LENGTH,
 )
-from database import get_connection
+from database import connection
 from logic.operations import get_department_setting, set_department_setting
 from logic.scheduling import (
     get_current_cycle_window,
@@ -80,32 +80,31 @@ def list_pay_periods_catalog(
     """List pay periods from department anchor through reference for search/history pickers."""
     ref = reference or date.today()
     current_start, current_end = get_pay_period(ref)
-    conn = get_connection()
-    cursor = conn.cursor()
-    if officer_id:
-        cursor.execute(
+    with connection() as conn:
+        cursor = conn.cursor()
+        if officer_id:
+            cursor.execute(
+                """
+                SELECT pay_period_start AS period_start,
+                       SUM(hours_worked) AS total_hours,
+                       COUNT(*) AS line_count
+                FROM timecard_entries
+                WHERE officer_id = ?
+                GROUP BY pay_period_start
+            """,
+                (officer_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT pay_period_start AS period_start,
+                       SUM(hours_worked) AS total_hours,
+                       COUNT(DISTINCT officer_id) AS officer_count
+                FROM timecard_entries
+                GROUP BY pay_period_start
             """
-            SELECT pay_period_start AS period_start,
-                   SUM(hours_worked) AS total_hours,
-                   COUNT(*) AS line_count
-            FROM timecard_entries
-            WHERE officer_id = ?
-            GROUP BY pay_period_start
-        """,
-            (officer_id,),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT pay_period_start AS period_start,
-                   SUM(hours_worked) AS total_hours,
-                   COUNT(DISTINCT officer_id) AS officer_count
-            FROM timecard_entries
-            GROUP BY pay_period_start
-        """
-        )
-    data_by_start = {row["period_start"]: dict(row) for row in cursor.fetchall()}
-    conn.close()
+            )
+        data_by_start = {row["period_start"]: dict(row) for row in cursor.fetchall()}
 
     periods = []
     start = current_start
@@ -276,60 +275,59 @@ def get_pay_period_lock_reminder(
 
 def get_pay_period_history(limit: int = 6, officer_id: Optional[int] = None) -> Dict:
     """Summarize recent pay periods from timecard and payroll data."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    if officer_id:
-        cursor.execute(
-            """
-            SELECT pay_period_start AS period_start,
-                   SUM(hours_worked) AS total_hours,
-                   1 AS officer_count
-            FROM timecard_entries
-            WHERE officer_id = ?
-            GROUP BY pay_period_start
-            ORDER BY pay_period_start DESC
-            LIMIT ?
-        """,
-            (officer_id, limit),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT pay_period_start AS period_start,
-                   SUM(hours_worked) AS total_hours,
-                   COUNT(DISTINCT officer_id) AS officer_count
-            FROM timecard_entries
-            GROUP BY pay_period_start
-            ORDER BY pay_period_start DESC
-            LIMIT ?
-        """,
-            (limit,),
-        )
-    rows = [dict(r) for r in cursor.fetchall()]
-    for row in rows:
-        p_start = row["period_start"]
-        _, p_end = get_pay_period(parse_date(p_start))
-        row["period_end"] = p_end.isoformat()
+    with connection() as conn:
+        cursor = conn.cursor()
         if officer_id:
             cursor.execute(
                 """
-                SELECT COALESCE(SUM(calculated_pay), 0) AS total_pay
-                FROM payroll_entries
-                WHERE officer_id = ? AND pay_period_start = ?
+                SELECT pay_period_start AS period_start,
+                       SUM(hours_worked) AS total_hours,
+                       1 AS officer_count
+                FROM timecard_entries
+                WHERE officer_id = ?
+                GROUP BY pay_period_start
+                ORDER BY pay_period_start DESC
+                LIMIT ?
             """,
-                (officer_id, p_start),
+                (officer_id, limit),
             )
         else:
             cursor.execute(
                 """
-                SELECT COALESCE(SUM(calculated_pay), 0) AS total_pay
-                FROM payroll_entries
-                WHERE pay_period_start = ?
+                SELECT pay_period_start AS period_start,
+                       SUM(hours_worked) AS total_hours,
+                       COUNT(DISTINCT officer_id) AS officer_count
+                FROM timecard_entries
+                GROUP BY pay_period_start
+                ORDER BY pay_period_start DESC
+                LIMIT ?
             """,
-                (p_start,),
+                (limit,),
             )
-        row["total_pay"] = round(cursor.fetchone()["total_pay"] or 0, 2)
-        row["total_hours"] = round(row["total_hours"] or 0, 2)
-        row["locked"] = is_pay_period_locked(parse_date(p_start))
-    conn.close()
+        rows = [dict(r) for r in cursor.fetchall()]
+        for row in rows:
+            p_start = row["period_start"]
+            _, p_end = get_pay_period(parse_date(p_start))
+            row["period_end"] = p_end.isoformat()
+            if officer_id:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(SUM(calculated_pay), 0) AS total_pay
+                    FROM payroll_entries
+                    WHERE officer_id = ? AND pay_period_start = ?
+                """,
+                    (officer_id, p_start),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(SUM(calculated_pay), 0) AS total_pay
+                    FROM payroll_entries
+                    WHERE pay_period_start = ?
+                """,
+                    (p_start,),
+                )
+            row["total_pay"] = round(cursor.fetchone()["total_pay"] or 0, 2)
+            row["total_hours"] = round(row["total_hours"] or 0, 2)
+            row["locked"] = is_pay_period_locked(parse_date(p_start))
     return {"success": True, "periods": rows}

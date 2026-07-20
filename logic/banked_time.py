@@ -5,7 +5,7 @@ from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 from config import CALLBACK_MINIMUM_HOURS, TIMECARD_REGULAR_TYPE
-from database import get_connection
+from database import connection
 from logic.labor_compliance import get_flsa_payroll_summary, get_flsa_work_period_days
 from logic.officers import get_officer_by_id
 from logic.operations import get_officer_time_banks
@@ -133,24 +133,23 @@ def _collect_timecard_bank_events(
         return []
 
     clause, params = _date_clause(start, end, column="t.entry_date")
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        f"""
-        SELECT t.*, p.comp_bank_delta AS pe_comp, p.sick_bank_delta AS pe_sick,
-               p.float_holiday_bank_delta AS pe_float, p.holiday_bank_delta AS pe_holiday
-        FROM timecard_entries t
-        LEFT JOIN payroll_entries p ON p.id = t.payroll_entry_id
-        WHERE t.officer_id = ?
-          AND t.hours_worked > 0
-          AND t.entry_type != ?
-          {clause}
-        ORDER BY t.entry_date, t.id
-        """,
-        [officer_id, TIMECARD_REGULAR_TYPE, *params],
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT t.*, p.comp_bank_delta AS pe_comp, p.sick_bank_delta AS pe_sick,
+                   p.float_holiday_bank_delta AS pe_float, p.holiday_bank_delta AS pe_holiday
+            FROM timecard_entries t
+            LEFT JOIN payroll_entries p ON p.id = t.payroll_entry_id
+            WHERE t.officer_id = ?
+              AND t.hours_worked > 0
+              AND t.entry_type != ?
+              {clause}
+            ORDER BY t.entry_date, t.id
+            """,
+            [officer_id, TIMECARD_REGULAR_TYPE, *params],
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
 
     events: List[Dict] = []
     base_rate = float(officer.get("pay_rate") or 0.0)
@@ -192,26 +191,25 @@ def _collect_payroll_bank_events(
     end: Optional[date],
 ) -> List[Dict]:
     clause, params = _date_clause(start, end)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        f"""
-        SELECT *
-        FROM payroll_entries
-        WHERE officer_id = ?
-          AND (
-            ABS(COALESCE(comp_bank_delta, 0)) > 0
-            OR ABS(COALESCE(sick_bank_delta, 0)) > 0
-            OR ABS(COALESCE(float_holiday_bank_delta, 0)) > 0
-            OR ABS(COALESCE(holiday_bank_delta, 0)) > 0
-          )
-          {clause}
-        ORDER BY entry_date, id
-        """,
-        [officer_id, *params],
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM payroll_entries
+            WHERE officer_id = ?
+              AND (
+                ABS(COALESCE(comp_bank_delta, 0)) > 0
+                OR ABS(COALESCE(sick_bank_delta, 0)) > 0
+                OR ABS(COALESCE(float_holiday_bank_delta, 0)) > 0
+                OR ABS(COALESCE(holiday_bank_delta, 0)) > 0
+              )
+              {clause}
+            ORDER BY entry_date, id
+            """,
+            [officer_id, *params],
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
 
     events: List[Dict] = []
     for row in rows:
@@ -378,21 +376,20 @@ def get_timecard_entries_for_scope(
 
     start, end, scope_label = resolve_time_scope(scope, reference)
     clause, params = _date_clause(start, end)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        f"""
-        SELECT *
-        FROM timecard_entries
-        WHERE officer_id = ?
-          AND hours_worked > 0
-          {clause}
-        ORDER BY entry_date, id
-        """,
-        [officer_id, *params],
-    )
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM timecard_entries
+            WHERE officer_id = ?
+              AND hours_worked > 0
+              {clause}
+            ORDER BY entry_date, id
+            """,
+            [officer_id, *params],
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
 
     total_hours = round(sum(float(r.get("hours_worked") or 0.0) for r in rows), 2)
     return {
