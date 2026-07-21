@@ -2658,6 +2658,53 @@ def optimize_staffing_scenarios(
         "," in str(x) for x in (axes.get("base_variations") or [])
     )
 
+    # Staged feasibility: shrink domain by constraint groups before full sim
+    # Score / fairness / certs are NOT stages. Soft never blocks Find Best.
+    from logic.staffing_search_stages import (
+        format_stage_report,
+        run_feasibility_stages,
+    )
+
+    axes, stage_outcomes, stage_tips = run_feasibility_stages(
+        axes,
+        annual=annual,
+        annual_variance=float(annual_hours_variance),
+        annual_hours_hard=bool(annual_hours_hard),
+        coverage_247=cov247,
+        use_extra_windows=bool(use_extra_windows and windows),
+        extra_windows=windows,
+        progress=lambda info: _progress(**info) if isinstance(info, dict) else None,
+        cancel_check=_cancelled,
+    )
+    style = axes.get("style") or style
+    multi_block_mode = any((v and any("," in str(x) for x in v)) for v in axes.get("variation_sets") or []) or any(
+        "," in str(x) for x in (axes.get("base_variations") or [])
+    )
+    stage_report_lines = format_stage_report(stage_outcomes)
+    try:
+        space = estimate_search_space(
+            rotation_types=list(axes.get("rotation_types") or []),
+            officer_counts=list(axes.get("officer_counts") or []),
+            min_per_shift_options=list(axes.get("min_per_shift_options") or []),
+            shift_length_options=list(axes.get("length_opts") or []),
+            shift_starts_options=axes.get("locked_starts_opts"),
+            rotation_style=style or "",
+            rotation_variations=list(axes.get("base_variations") or []),
+            free_officer_counts=False,
+            free_starts=bool(axes.get("free_starts")),
+            free_lengths=False,
+            free_variations=False,
+            stagger_phases=stagger_phases,
+            annual_hours_hard=bool(annual_hours_hard),
+            annual_hours_target=annual,
+            annual_hours_variance=float(annual_hours_variance),
+            coverage_247=cov247,
+            use_extra_windows=bool(use_extra_windows and windows),
+            extra_windows=windows,
+        )
+    except Exception:
+        pass
+
     # C5 — early impossible when every officer count fails pattern/body floors
     from logic.optimizer_features import diversify_ranked, early_impossible_proof
 
@@ -4147,6 +4194,11 @@ def optimize_staffing_scenarios(
             msg += " · Partial scan (not every layout checked)"
     if soft_msg and best and best.get("hard_constraints_ok"):
         msg = f"{msg} · {soft_msg}" if msg else soft_msg
+    if stage_report_lines and not best:
+        # Surface first stage tip in banner when hard-fail
+        tip0 = (stage_tips or [None])[0]
+        if tip0:
+            msg = f"{msg} · Stage tip: {tip0}" if msg else f"Stage tip: {tip0}"
 
     if require_hard_ok:
         success = bool(results)
@@ -4184,6 +4236,26 @@ def optimize_staffing_scenarios(
         cancelled=cancelled,
     )
 
+    # Feasibility narrative + recovery tips (not score)
+    stage_note = "\n".join(stage_report_lines or [])
+    if stage_tips:
+        stage_note = (
+            (stage_note + "\n" if stage_note else "") + "Tips:\n" + "\n".join(f"· {t}" for t in stage_tips[:12])
+        )
+    if require_hard_ok and not results:
+        try:
+            from logic.result_narrowers import failure_recovery_options
+
+            rec = failure_recovery_options({"success": False, "failure_histogram": fail_hist, "best": None})
+            if rec:
+                stage_note = (stage_note + "\n" if stage_note else "") + "Recovery (after total fail):\n"
+                stage_note += "\n".join(f"· {x.get('action')}: {x.get('why')}" for x in rec[:6])
+        except Exception:
+            pass
+    space_note_out = space.get("warning") or ""
+    if stage_note:
+        space_note_out = (stage_note + ("\n\n" + space_note_out if space_note_out else "")).strip()
+
     return {
         "success": success,
         "cancelled": cancelled,
@@ -4202,7 +4274,20 @@ def optimize_staffing_scenarios(
         "wall_time_ms": wall_ms,
         "failure_histogram": fail_hist,
         "space_estimate": space,
-        "space_note": space.get("warning") or "",
+        "space_note": space_note_out,
+        "stage_report": [
+            {
+                "stage_id": o.stage_id,
+                "title": o.title,
+                "ok": o.ok,
+                "tips": list(o.tips),
+                "reasons": list(o.reasons),
+                "before": dict(o.before),
+                "after": dict(o.after),
+            }
+            for o in (stage_outcomes or [])
+        ],
+        "stage_tips": list(stage_tips or []),
         "domain_report": domain_reduction_report(axes),
         "bind_reasons": list(axes.get("bind_reasons") or []),
         "constraint_weights": weights,
@@ -4242,6 +4327,7 @@ def optimize_staffing_scenarios(
             "variation_sets": len(axes["variation_sets"]),
             "annual_hours_target": annual,
             "search_mode": "exhaustive" if prefer_exhaustive and not search_truncated else "anytime",
+            "search_architecture": "staged_feasibility",
             "constraint_weights": weights,
             "bind_reasons": list(axes.get("bind_reasons") or []),
         },

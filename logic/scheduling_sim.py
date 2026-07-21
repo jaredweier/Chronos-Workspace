@@ -237,6 +237,13 @@ def estimate_staffing_search_space(**kwargs) -> Dict:
     return estimate_search_space(**kwargs)
 
 
+def run_staffing_stage_wizard(**kwargs) -> Dict:
+    """Pause after feasibility stages — lock dims — then full Find Best."""
+    from logic.staffing_stage_wizard import run_stages_only
+
+    return run_stages_only(**kwargs)
+
+
 def find_min_officers_hard(**kwargs) -> Dict:
     """Binary-search minimum headcount for hard constraints."""
     from logic.optimizer_features import find_min_officers_hard as _fn

@@ -21,6 +21,7 @@ from logic.scheduling_sim import (
     estimate_staffing_search_space,
     find_min_officers_hard,
     run_staffing_optimizer,
+    run_staffing_stage_wizard,
     what_if_staffing_delta,
 )
 from logic.staffing_insights import detect_constraint_conflicts
@@ -612,6 +613,119 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
         _refresh_space_estimate()
         await _run_opt(require_hard_ok=True)
 
+    async def run_stage_wizard():
+        """Pause after feasibility stages — lock dims — then full Find Best."""
+        kw = _optimizer_kwargs(require_hard_ok=bool(state.get("hard_mode", True)))
+        if kw.get("error"):
+            ui.notify(kw.get("error") or "Check Numeric Fields", type="negative")
+            return
+        kw.pop("error", None)
+        _set_search_buttons(True)
+        set_summary("Running feasibility stages (no full sim yet)…")
+        try:
+            progress: dict = {"message": "Stages…"}
+
+            def _on_progress(info: dict) -> None:
+                if isinstance(info, dict):
+                    progress["message"] = str(info.get("message") or progress["message"])
+
+            job = dict(kw)
+            job["progress_callback"] = _on_progress
+            loop = asyncio.get_event_loop()
+            fut = loop.run_in_executor(OPT_EXECUTOR, lambda: run_staffing_stage_wizard(**job))
+            while not fut.done():
+                try:
+                    search_status.set_text(str(progress.get("message") or "Stages…")[:80])
+                except Exception:
+                    pass
+                set_summary(str(progress.get("message") or "Stages…"))
+                await asyncio.sleep(0.2)
+            result = fut.result()
+        except Exception as exc:
+            _set_search_buttons(False)
+            ui.notify(f"Stage wizard failed: {exc}", type="negative")
+            return
+        finally:
+            _set_search_buttons(False)
+
+        if not isinstance(result, dict):
+            ui.notify("Stage wizard bad result", type="negative")
+            return
+        state["stage_wizard"] = result
+        lines = list(result.get("stage_lines") or [])
+        lines.append("")
+        lines.append(result.get("message") or "Stages done")
+        for t in list(result.get("stage_tips") or [])[:8]:
+            lines.append(f"· {t}")
+        set_summary("\n".join(lines))
+
+        with (
+            ui.dialog() as dlg,
+            ui.card()
+            .classes("q-pa-md")
+            .style(
+                "min-width:24rem;max-width:40rem;background:#0C1A2E;color:#E8EDF4;border:1px solid rgba(91,141,239,0.4)"
+            ),
+        ):
+            ui.label("Stage wizard — pause before full search").style("font-weight:700;font-size:1.1rem;color:#F8FAFC")
+            ui.label("Feasibility stages finished. Lock dimensions to shrink search, then continue.").style(
+                "color:#9AABC4;margin:8px 0 12px;line-height:1.4"
+            )
+            for line in list(result.get("stage_lines") or [])[:12]:
+                ui.label(line).style("color:#D6E6FF;font-size:0.85rem;white-space:pre-wrap")
+
+            hints = result.get("form_hints") or {}
+            if hints:
+                ui.label("Auto-lock suggestion: " + ", ".join(f"{k}={v}" for k, v in hints.items())).style(
+                    "color:#86efac;margin-top:8px"
+                )
+
+            apply_payload = c.get("apply_form_payload")
+
+            def _apply_patch(patch: dict, lab: str = ""):
+                if not patch:
+                    return
+                if callable(apply_payload):
+                    try:
+                        apply_payload(patch)
+                    except Exception:
+                        pass
+                ui.notify(f"Locked: {lab or list(patch.keys())}", type="positive")
+
+            if hints and apply_payload:
+
+                def _auto():
+                    _apply_patch(hints, "auto from stages")
+                    dlg.close()
+
+                ui.button("Apply auto-locks", on_click=_auto).classes("btn-primary q-mt-sm").props("no-caps unelevated")
+
+            for a in list(result.get("lock_actions") or [])[:8]:
+                lab = a.get("label") or a.get("id")
+                patch = a.get("form_patch") or {}
+                why = a.get("why") or ""
+
+                def _clk(p=patch, L=lab):
+                    _apply_patch(p, L)
+
+                ui.button(str(lab), on_click=_clk).classes("btn-ghost q-mt-xs").props(
+                    "no-caps outline dense align=left"
+                ).style("width:100%;text-align:left;white-space:normal")
+                if why:
+                    ui.label(why).style("color:#9AABC4;font-size:0.8rem;margin:0 0 6px 10px")
+
+            async def _continue_full():
+                dlg.close()
+                await _run_opt(require_hard_ok=bool(state.get("hard_mode", True)), force=True)
+
+            ui.button("Continue full Find Best", on_click=_continue_full).classes("btn-primary q-mt-md").props(
+                "no-caps unelevated"
+            )
+            ui.button("Close (edit form manually)", on_click=dlg.close).classes("btn-ghost q-mt-sm").props(
+                "no-caps outline"
+            )
+        dlg.open()
+
     async def run_compare():
         """Compare 8/10/12h under same coverage constraints (locked N)."""
         if state.get("opt_running"):
@@ -775,6 +889,7 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
         "execute_opt": _execute_opt,
         "run_opt_inner": _run_opt,
         "run_opt": run_opt,
+        "run_stage_wizard": run_stage_wizard,
         "run_compare": run_compare,
         "run_min_n": run_min_n,
         "run_whatif": run_whatif,

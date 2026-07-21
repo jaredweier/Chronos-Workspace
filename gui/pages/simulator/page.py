@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from nicegui import ui
 
 from config import SIMULATOR_ROTATION_TYPES
@@ -544,6 +546,12 @@ def render_simulator() -> None:
                         on_click=lambda: (state.get("_run_open_shift_deputy") or (lambda: None))(),
                     )
                     ui.menu_item("OT ledger ↔ FLSA meters", on_click=lambda: run_ot_flsa_bridge())
+                    ui.menu_item("Narrow options (FLSA/fatigue/certs)", on_click=lambda: open_end_narrowers())
+                    ui.menu_item("Stage tips · lock for faster search", on_click=lambda: open_stage_lock_actions())
+                    ui.menu_item(
+                        "Stage wizard (pause → lock → Find Best)",
+                        on_click=lambda: asyncio.create_task(run_stage_wizard()),
+                    )
                 with ui.dropdown_button("Export", icon="ios_share").classes("btn-ghost").props("no-caps outline dense"):
                     ui.menu_item("Options CSV", on_click=lambda: export_options())
                     ui.menu_item("Search audit JSON", on_click=lambda: export_audit())
@@ -1152,6 +1160,7 @@ def render_simulator() -> None:
         _execute_opt = _oa["execute_opt"]
         _run_opt = _oa["run_opt_inner"]
         run_opt = _oa["run_opt"]
+        run_stage_wizard = _oa["run_stage_wizard"]
         run_compare = _oa["run_compare"]
         run_min_n = _oa["run_min_n"]
         run_whatif = _oa["run_whatif"]
@@ -1290,6 +1299,13 @@ def render_simulator() -> None:
             plan_box,
             _ui_safe,
             set_why,
+            render_ranked=_render_ranked,
+            set_summary=set_summary,
+            form_refs={
+                "use_fatigue": use_fatigue,
+                "min_rest": min_rest,
+                "max_consec": max_consec,
+            },
         )
         show_pins = _result_tools["show_pins"]
         show_slots = _result_tools["show_slots"]
@@ -1297,6 +1313,8 @@ def render_simulator() -> None:
         do_window_drill = _result_tools["do_window_drill"]
         show_weekend_heat = _result_tools["show_weekend_heat"]
         show_search_history = _result_tools["show_search_history"]
+        open_end_narrowers = _result_tools["open_end_narrowers"]
+        open_stage_lock_actions = _result_tools["open_stage_lock_actions"]
 
         _vis = bind_visuals_panel(state, visuals_host, set_why=lambda t="": set_why(t))
         paint_visuals = _vis["paint_visuals"]
