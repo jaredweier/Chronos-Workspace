@@ -97,21 +97,19 @@ def validate_request_type(request_type: str) -> ValidationResult:
 
 
 def _officer_unavailable_on_date(officer_id: int, target_date: date) -> bool:
-    from database import get_connection
+    from database import connection
 
     date_str = target_date.isoformat()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT 1 FROM officer_availability
-        WHERE officer_id = ? AND unavailable_date = ?
-    """,
-        (officer_id, date_str),
-    )
-    found = cursor.fetchone() is not None
-    conn.close()
-    return found
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1 FROM officer_availability
+            WHERE officer_id = ? AND unavailable_date = ?
+        """,
+            (officer_id, date_str),
+        )
+        return cursor.fetchone() is not None
 
 
 def validate_process_day_off(

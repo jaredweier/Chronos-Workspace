@@ -9,7 +9,7 @@
 Short fragments / bullets. No preamble, no recap. Full prose only if user asks: explain / teach / write docs / design review. Ship claims still need `check` + `honest_gate`.
 
 ## Sufficiency
-Stop gathering when confident to answer. No extra reads/tools unless info is contradictory or clearly incomplete. No mandatory OSS or graphify unless user asks.
+Stop gathering when confident to answer. No extra reads/tools unless info is contradictory or clearly incomplete. Graphify/vision/OSS only when cost/ROI beats primary (not every turn).
 
 ## Blocked
 `FULL_PROJECT_CODE.txt` · full `HANDOFF.md` · `.grok/skills/` tree · `tests/ui_snapshots/baseline/` · `logs/` · `.grok/sessions/` · whole-repo reads
@@ -47,7 +47,9 @@ Terminal only — use every session, no LLM:
 | Long thread | `python dev.py context-window status` — summarize @ 6000t |
 | Index/prompts | `python dev.py token-minimize` |
 
-**Never:** whole-repo reads · subagents for `cheap-check`/`preflight`/`audit` · `ui-exhaustive` for typos · default PNG attachments · read 50KB+ `.py` without `outline` first (hook: `beforeReadFile`).
+**Never:** whole-repo thrash · thrash graphify/vision · leave archived skills live after use · `ui-exhaustive` for typos · default PNG attachments · read 50KB+ `.py` without `outline` first (hook: `beforeReadFile`).
+
+**Leverage (allowed):** tools / skills / subagents when they improve quality/speed **or cost less than primary**. **Cost split:** easy → cheap/free; hard product/logic/ship → primary. Verify/gates, explore/plan, graphify, vision OK **if cheaper / better ROI**. Archived skills: use → put back in `docs/archived_skills/`.
 
 ## Continuous minimization
 Agents **find and ship** new savings — not only follow existing rules.
@@ -98,7 +100,7 @@ Agents **find and ship** new savings — not only follow existing rules.
 
 ## Scheduling (stable facts)
 
-Rotation/bump/day-off: `logic/scheduling.py`, `validators.py`. Night minimum Fri/Sat only. Known fixes: `.grok/rules/known-issues.md`
+Rotation/bump/day-off: `logic/scheduling.py`, `validators.py`. Night minimum Fri/Sat only. Known fixes: `.grok/rules/on-demand/known-issues.md`
 
 ## Env
 `SCHEDULER_SLICE` · `SCHEDULER_AGENT_TASK` · `SCHEDULER_SKIP_AGENT_GATES=1` · `SCHEDULER_SKIP_STARTUP_GATES=1`

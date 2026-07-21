@@ -87,17 +87,35 @@ def render_results_panel_tools(state, _apply_ranked_option, _apply_form_payload,
                         _apply_ranked_option(row)
                     cfg = s.get("config") or {}
                     if cfg:
+                        # Full form payload shape — use flags + rot model so toggles match
+                        vars_raw = cfg.get("rotation_variations") or []
+                        has_vars = bool(vars_raw)
                         _apply_form_payload(
                             {
                                 "officers": cfg.get("num_officers"),
                                 "length": cfg.get("shift_length_hours"),
                                 "annual": cfg.get("annual_hours_target"),
+                                "annual_var": cfg.get("annual_hours_variance"),
                                 "starts": ", ".join(cfg.get("shift_starts") or [])
                                 if isinstance(cfg.get("shift_starts"), list)
                                 else cfg.get("shift_starts"),
-                                "variations": " | ".join(cfg.get("rotation_variations") or [])
-                                if isinstance(cfg.get("rotation_variations"), list)
-                                else cfg.get("rotation_variations"),
+                                "variations": " | ".join(vars_raw) if isinstance(vars_raw, list) else vars_raw,
+                                "use_officers": cfg.get("num_officers") is not None,
+                                "use_length": cfg.get("shift_length_hours") is not None,
+                                "use_starts": bool(cfg.get("shift_starts")),
+                                "use_annual": cfg.get("annual_hours_target") is not None,
+                                "use_rot_model": True,
+                                "rot_model_kind": ("Multi-block on/off" if has_vars else "Squad preset"),
+                                "use_style": has_vars,
+                                "use_rotation": not has_vars,
+                                "use_fatigue": float(cfg.get("min_rest_hours") or 0) > 0
+                                or int(cfg.get("max_consecutive_work_days") or 0) > 0,
+                                "min_rest": cfg.get("min_rest_hours"),
+                                "max_consec": cfg.get("max_consecutive_work_days"),
+                                "use_247": int(cfg.get("coverage_247") or 0) > 0,
+                                "cov247": cfg.get("coverage_247"),
+                                "use_windows": bool(cfg.get("use_extra_windows")),
+                                "min_ps": cfg.get("min_per_shift"),
                                 "windows": cfg.get("extra_windows"),
                             }
                         )

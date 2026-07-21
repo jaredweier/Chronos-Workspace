@@ -7,6 +7,11 @@ import re
 import subprocess
 import sys
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -58,10 +63,7 @@ def run_fix_hint(run_audit: bool = True) -> int:
     if run_audit:
         print("\n>>> audit (free)")
         result = subprocess.run(
-            [sys.executable, "dev.py", "audit"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
+            [sys.executable, "dev.py", "audit"], cwd=ROOT, capture_output=True, text=True, encoding="utf-8"
         )
         out = (result.stdout or "") + (result.stderr or "")
         for line in out.splitlines():

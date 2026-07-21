@@ -25,7 +25,7 @@ python dev.py ui-review · ui-diff --quick · chronos-e2e
 
 - Prefer complete UX over half-wired features
 - Call `logic.*` for domain ops; no SQL in gui/
-- Keep `.grok/rules/ui-modern.md` tokens
+- Keep `.grok/rules/on-demand/ui-modern.md` tokens
 
 ## Related
 

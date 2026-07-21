@@ -30,7 +30,9 @@ class SimulatorConfig:
     shift_length_hours: float
     annual_hours_target: float
     shift_starts: List[str]
-    apply_department_rules: bool = True
+    # Default False matches UI/optimizer/store — pure what-if sims.
+    # True pulls live roster squads (can leave a squad empty if roster is unbalanced).
+    apply_department_rules: bool = False
     min_per_shift: int = 1
     simulation_days: int = 28
     night_minimum: int = NIGHT_MINIMUM_OFFICERS
@@ -146,20 +148,84 @@ def generate_shift_templates(
     return templates
 
 
-def _squad_working(rotation_type: str, squad: str, cycle_day: int, preset: Dict) -> bool:
+def _squad_working(
+    rotation_type: str,
+    squad: str,
+    cycle_day: int,
+    preset: Dict,
+    *,
+    phase: int = 0,
+) -> bool:
+    """Whether squad is ON for cycle_day (1-based). phase shifts squad_patterns rings."""
+    del rotation_type  # preset already resolved by caller
     if "squad_a_days" in preset:
         on_a = cycle_day in preset["squad_a_days"]
         return on_a if squad == "A" else not on_a
     if "squad_patterns" in preset:
         pattern = preset["squad_patterns"].get(squad, preset["squad_patterns"].get("A", []))
-        idx = (cycle_day - 1) % len(pattern)
-        return pattern[idx] == 1
+        if not pattern:
+            return False
+        # phase rotates the duty ring so single-squad presets can stagger
+        idx = (cycle_day - 1 + int(phase or 0)) % len(pattern)
+        return bool(pattern[idx])
     work_days = preset.get("work_days_per_cycle", 7)
     half = work_days // preset.get("squads", 2)
+    cyc = max(1, int(preset.get("cycle_length") or 1))
     if squad == "A":
-        return ((cycle_day - 1) % preset["cycle_length"]) < half
-    offset = preset["cycle_length"] // preset.get("squads", 2)
-    return ((cycle_day - 1 + offset) % preset["cycle_length"]) < half
+        return ((cycle_day - 1 + int(phase or 0)) % cyc) < half
+    offset = cyc // preset.get("squads", 2)
+    return ((cycle_day - 1 + offset + int(phase or 0)) % cyc) < half
+
+
+def _squad_union_has_off_day(preset: Dict) -> bool:
+    """True if unphased squad patterns leave some cycle day with nobody ON."""
+    if "squad_a_days" in preset:
+        return False  # classic A/B complement covers every day
+    patterns = preset.get("squad_patterns") or {}
+    vecs = [list(v) for v in patterns.values() if v]
+    if not vecs:
+        # equal-split fallback without patterns: multi-squad covers by construction
+        return int(preset.get("squads") or 1) <= 1
+    n = max(len(v) for v in vecs)
+    for d in range(n):
+        if not any(bool(v[d % len(v)]) for v in vecs):
+            return True
+    return False
+
+
+def _squad_phase_offsets(
+    preset: Dict,
+    n_slots: int,
+    *,
+    stagger: bool,
+    phase_overrides: Optional[List[int]] = None,
+) -> List[int]:
+    """Per-slot duty-ring phase for squad presets (enables 24/7 on single-pattern rings).
+
+    Only auto-staggers when the unphased multi-squad union has holes (e.g. Continental
+    single ring). Complement A/B packs (Pitman, 4-on-4-off) keep phase 0 so pairs stay
+    opposite.
+    """
+    n = max(0, int(n_slots))
+    if n < 1:
+        return []
+    cyc = max(1, int(preset.get("cycle_length") or 1))
+    if phase_overrides is not None:
+        out = []
+        step0 = max(1, cyc // max(n, 1))
+        for i in range(n):
+            if i < len(phase_overrides):
+                out.append(int(phase_overrides[i]) % cyc)
+            else:
+                out.append((i * step0) % cyc)
+        return out
+    if not stagger or n <= 1 or not _squad_union_has_off_day(preset):
+        return [0] * n
+    # Even stagger across the cycle (same idea as multi-block phase search seed)
+    if n > cyc:
+        return [i % cyc for i in range(n)]
+    step = max(1, cyc // n)
+    return [(i * step) % cyc for i in range(n)]
 
 
 def _assign_officers(
@@ -168,19 +234,35 @@ def _assign_officers(
     preset: Dict,
     roster_officers: Optional[List[Dict]] = None,
 ) -> List[SimulatorOfficerSlot]:
+    """Build exactly ``num_officers`` slots (pad roster shortfall with synthetics).
+
+    Earlier bug: when roster was shorter than num_officers, only len(roster)
+    slots were created — silent headcount truncation.
+    """
     squads = ["A", "B"] if preset.get("squads", 2) >= 2 else ["A"]
-    slots = []
-    roster = (roster_officers or [])[:num_officers]
-    count = len(roster) if roster else num_officers
-    for i in range(count):
-        shift_start, shift_end = shift_templates[i % len(shift_templates)]
-        if roster:
+    n_sq = max(1, int(preset.get("squads") or len(squads)))
+    # Expand squad labels beyond A/B when preset has 3+ squads
+    if n_sq > len(squads):
+        squads = [chr(ord("A") + i) for i in range(n_sq)]
+    slots: List[SimulatorOfficerSlot] = []
+    roster = list(roster_officers or [])[: max(0, int(num_officers))]
+    n = max(0, int(num_officers))
+    templates = shift_templates or [("06:00", "14:00")]
+    for i in range(n):
+        shift_start, shift_end = templates[i % len(templates)]
+        if i < len(roster):
             officer = roster[i]
+            raw_sq = (officer.get("squad") or "").strip().upper()
+            # Keep real squad if it is a valid preset letter; else alternate
+            if raw_sq and raw_sq in squads:
+                squad = raw_sq
+            else:
+                squad = squads[i % len(squads)]
             slots.append(
                 SimulatorOfficerSlot(
-                    slot_id=officer["id"],
-                    label=officer["name"],
-                    squad=officer.get("squad") or squads[i % len(squads)],
+                    slot_id=int(officer.get("id") or i + 1),
+                    label=str(officer.get("name") or f"Officer {i + 1}"),
+                    squad=squad,
                     shift_start=shift_start,
                     shift_end=shift_end,
                     projected_annual_hours=0.0,
@@ -266,24 +348,75 @@ def _balance_day_assignments(
     prefer_night: bool = False,
     fri_sat_window: bool = False,
     nearby_hops: int = 1,
+    window_min: int = 0,
+    window_start: str = "",
+    window_end: str = "",
+    shift_length_hours: float = 8.0,
+    coverage_247: int = 0,
+    active_windows: Optional[List[Dict]] = None,
+    min_rest_hours: float = 0.0,
+    prev_work_starts: Optional[List[Optional[str]]] = None,
 ) -> List[Tuple[str, str]]:
     """Assign today's working officers onto pack bands.
 
-    Officers keep a *home* start but may move to nearby pack bands (default ±1),
-    e.g. home 19:00 → 14:00 or 22:00. Fri/Sat window mode still targets evening
-    coverage while preferring home/nearby affinity over free float.
+    Officers keep a *home* start but may move to nearby pack bands (default ±1).
+    When a coverage window is active, bias seats onto bands that cover that window
+    (clocks from window_start/end — not a baked example).
+    When coverage_247>0, window rebalance must not collapse the 24h tile.
+    active_windows: optional list of {start_time,end_time,min_officers} for multi-window days.
+    min_rest_hours + prev_work_starts: prefer seats that leave enough rest after yesterday.
     """
     if not working_slots or not shift_templates:
         return []
     n = len(working_slots)
     k = len(shift_templates)
-    need = max(min_per_shift, 1)
-    # Time-sort pack so "nearby" = adjacent clocks (06↔14↔19↔22)
+    # min_per_shift floor on *used* starts; 0 = no floor (geometry still uses geo_need=1)
+    need = max(0, int(min_per_shift or 0))
+    geo_need = max(need, 1)
+    preserve_247 = int(coverage_247 or 0) > 0
+    min_rest = float(min_rest_hours or 0)
+    prev_sts: List[Optional[str]] = list(prev_work_starts or [])
+    while len(prev_sts) < n:
+        prev_sts.append(None)
+    # Time-sort pack so "nearby" = adjacent clocks
     order = sorted(range(k), key=lambda i: _hhmm_to_min(shift_templates[i][0]))
     inv = [0] * k
     for rank, bi in enumerate(order):
         inv[bi] = rank
-    counts = [n // k + (1 if i < n % k else 0) for i in range(k)]
+
+    # Seat plan for *today*. Thin rotation days may run fewer bands than the
+    # home pack size — equal spacing of the full pack is not required daily.
+    # Prefer a subset that spans the clock (24h continuity) over forcing all k.
+    if n >= k * geo_need:
+        counts = [n // k + (1 if i < n % k else 0) for i in range(k)]
+    else:
+        # How many distinct starts can we staff at geo_need each?
+        n_active = max(1, min(k, max(1, n // geo_need)))
+        # Prefer at least enough starts to tile ~24h at this length (soft goal)
+        length_h = max(0.5, float(shift_length_hours or 8.0))
+        span_goal = max(1, int(math.ceil(24.0 / length_h)))
+        n_active = max(n_active, min(k, min(n, span_goal)))
+        n_active = min(n_active, n)  # can't open more bands than bodies if need=1
+        counts = [0] * k
+        if n_active >= k:
+            picks = list(order)
+        elif n_active == 1:
+            picks = [order[0]]
+        else:
+            picks = []
+            for j in range(n_active):
+                rank = int(round(j * (k - 1) / max(n_active - 1, 1)))
+                bi = order[rank]
+                if bi not in picks:
+                    picks.append(bi)
+            for bi in order:
+                if len(picks) >= n_active:
+                    break
+                if bi not in picks:
+                    picks.append(bi)
+        na = max(1, len(picks))
+        for j, bi in enumerate(picks):
+            counts[bi] = n // na + (1 if j < n % na else 0)
 
     def _hour(i: int) -> int:
         try:
@@ -291,17 +424,72 @@ def _balance_day_assignments(
         except ValueError:
             return 0
 
-    # Bands that cover Fri/Sat 19:00–03:00 style windows (start hour):
-    # 14–18:00 → through evening; 19:00 → full window; ≥20 → late night into morning.
-    afternoon = [i for i in range(k) if 12 <= _hour(i) < 19]
-    evening = [i for i in range(k) if _hour(i) == 19 or (18 <= _hour(i) < 20)]
-    night = [i for i in range(k) if _hour(i) >= 20 or _hour(i) < 6]
+    # Generic band classes (time-of-day only; window bias uses cover-set below)
+    afternoon = [i for i in range(k) if 12 <= _hour(i) < 18]
+    evening = [i for i in range(k) if 18 <= _hour(i) < 22]
+    night = [i for i in range(k) if _hour(i) >= 22 or _hour(i) < 6]
     morning = [i for i in range(k) if i not in afternoon and i not in evening and i not in night]
 
-    def _enforce_floor():
-        if n < k * need:
+    # Window samples → covering bands (continuous min occupancy, not just union hits).
+    # Each sample carries its own need (supports multiple windows same day).
+    cover_bands: List[int] = []
+    # (covering_band_indices, required_occupancy)
+    window_samples: List[Tuple[List[int], int]] = []
+    wmin = max(0, int(window_min or 0))
+    length_m = max(30, int(round(float(shift_length_hours) * 60)))
+
+    def _add_window_samples(w_start: str, w_end: str, need_occ: int) -> None:
+        if need_occ <= 0 or not w_start or not w_end:
             return
-        for i in range(k):
+        w_sm = _hhmm_to_min(w_start)
+        w_em = _hhmm_to_min(w_end)
+        win_len = (w_em - w_sm) % (24 * 60) or (24 * 60)
+        t = 0
+        while t < win_len:
+            abs_m = (w_sm + t) % (24 * 60)
+            covering: List[int] = []
+            for i in range(k):
+                sm = _hhmm_to_min(shift_templates[i][0])
+                rel = (abs_m - sm) % (24 * 60)
+                if rel < length_m:
+                    covering.append(i)
+            if covering:
+                window_samples.append((covering, int(need_occ)))
+                for bi in covering:
+                    if bi not in cover_bands:
+                        cover_bands.append(bi)
+            t += 30
+
+    if fri_sat_window:
+        multi = list(active_windows or [])
+        if multi:
+            for aw in multi:
+                if not isinstance(aw, dict):
+                    continue
+                try:
+                    mo = int(aw.get("min_officers") or 0)
+                except (TypeError, ValueError):
+                    mo = 0
+                st = str(aw.get("start_time") or aw.get("start") or "").strip()
+                en = str(aw.get("end_time") or aw.get("end") or "").strip()
+                if mo > 0 and st and en:
+                    _add_window_samples(st, en, mo)
+        elif wmin > 0 and window_start and window_end:
+            _add_window_samples(window_start, window_end, wmin)
+
+    def _enforce_floor():
+        # Full roster day: keep every pack band at `need` when bodies allow.
+        # Thin day: only rebalance among bands already open (don't force equal pack).
+        # min_per_shift=0 → no per-band floor.
+        if need <= 0:
+            return
+        if n >= k * need:
+            targets = list(range(k))
+        else:
+            targets = [i for i in range(k) if counts[i] > 0]
+        if not targets:
+            return
+        for i in targets:
             guard = 0
             while counts[i] < need and guard < 10:
                 guard += 1
@@ -316,38 +504,131 @@ def _balance_day_assignments(
             return
         have = sum(counts[i] for i in group)
         guard = 0
+        donor_floor = need if need > 0 else 0
         while have < want and guard < 20:
             guard += 1
-            donors = [j for j in range(k) if j not in group and counts[j] > need]
+            donors = [j for j in range(k) if j not in group and counts[j] > donor_floor]
             if not donors:
                 donors = [j for j in range(k) if j not in group and counts[j] > 0]
+            if not donors:
+                # May open a closed pack band when window needs it (thin → denser)
+                donors = [j for j in range(k) if j not in group]
             if not donors:
                 break
             rich = max(donors, key=lambda j: counts[j])
             poor = min(group, key=lambda j: counts[j])
+            if counts[rich] <= 0 and rich not in group:
+                # pull one seat from richest active band
+                active = [j for j in range(k) if counts[j] > 0 and j not in group]
+                if not active:
+                    break
+                rich = max(active, key=lambda j: counts[j])
+            if counts[rich] <= 0:
+                break
             counts[rich] -= 1
             counts[poor] += 1
             have += 1
 
+    def _sample_occ(covering: List[int]) -> int:
+        return sum(counts[i] for i in covering)
+
+    def _shortfall(sample: Tuple[List[int], int]) -> int:
+        covering, need_occ = sample
+        return max(0, int(need_occ) - _sample_occ(covering))
+
+    def _rebalance_window_occupancy():
+        """Raise occupancy on short window samples (per-sample need).
+
+        Sequential bands (14:00 then 22:00 for 19–03) each need their need_occ
+        seats on samples they cover. Multi-window days merge all samples.
+        When preserve_247, never drain a band below 1 if that would leave fewer
+        than span_goal open bands (keeps 24h tile alive).
+        """
+        if not window_samples or n < 1:
+            return
+        length_h = max(0.5, float(shift_length_hours or 8.0))
+        span_goal = max(1, int(math.ceil(24.0 / length_h)))
+        for _ in range(n * k + 8):
+            thin = max(window_samples, key=_shortfall)
+            if _shortfall(thin) <= 0:
+                break
+            covering, need_occ = thin
+            # Prefer non-cover donors, then bands outside this sample
+            non_cover = [j for j in range(k) if j not in cover_bands and counts[j] > 0]
+            outside = [j for j in range(k) if j not in covering and counts[j] > 0]
+            donors = non_cover or outside
+            if not donors:
+                break
+
+            def _safe_donor(j: int) -> bool:
+                if counts[j] <= 0:
+                    return False
+                if preserve_247 and counts[j] == 1:
+                    open_n = sum(1 for i in range(k) if counts[i] > 0)
+                    if open_n <= span_goal:
+                        return False
+                # Don't increase another sample's shortfall
+                for s in window_samples:
+                    if s is thin:
+                        continue
+                    cov_s, need_s = s
+                    if j in cov_s and _sample_occ(cov_s) - 1 < need_s:
+                        # only block if it would create/worsen shortfall below need
+                        if _sample_occ(cov_s) <= need_s:
+                            return False
+                return True
+
+            safe = [j for j in donors if _safe_donor(j)]
+            if not safe:
+                break
+            rich = max(safe, key=lambda j: counts[j])
+            poor = min(covering, key=lambda j: counts[j])
+            if counts[rich] <= 0:
+                break
+            counts[rich] -= 1
+            counts[poor] += 1
+
     _enforce_floor()
-    if fri_sat_window and n >= 2:
-        # Prefer explicit evening starts (19:00 / 7p): two officers on 19:00 cover
-        # the whole 19:00–03:00 min-2 window alone (8h shift).
-        if evening:
-            _give(evening, min(2, n))
-            _enforce_floor()
-            # Still keep late-night continuity if bodies remain
-            if n >= 4:
-                _give(night, min(1, n))
+    if fri_sat_window and n >= 1 and (window_samples or wmin > 0):
+        if window_samples:
+            _rebalance_window_occupancy()
+            # Second pass after floor in case min_ps stole seats
+            if not preserve_247:
                 _enforce_floor()
-        elif n >= 4:
-            # Classic 06/14/22: need 2 afternoon (14:00 covers 19–22) + 2 night (22–06)
-            _give(afternoon, min(2, n - need * max(len(morning), 0)))
-            _give(night, min(2, n - need * max(len(morning) + len(afternoon), 0)))
+            _rebalance_window_occupancy()
+        elif cover_bands:
+            for bi in cover_bands:
+                _give([bi], min(wmin, n))
+            _enforce_floor()
+        elif evening:
+            _give(evening, min(wmin, n))
+            _enforce_floor()
+            if n >= wmin * 2:
+                _give(night, min(wmin, n))
+                _enforce_floor()
+        elif n >= wmin * 2:
+            _give(afternoon, min(wmin, n))
+            _give(night, min(wmin, n))
             _enforce_floor()
     elif prefer_night:
-        _give(evening + night + afternoon, min(2, n))
-        _enforce_floor()
+        # High-risk night: stack onto night bands without collapsing 24h tile.
+        # With n==span_goal (e.g. 3×8h), keep ≥1 on each open span band; only surplus
+        # stacks night (else 0/1/2 loses morning and breaks 24/7).
+        night_want = max(int(wmin or 0), 2)
+        length_h = max(0.5, float(shift_length_hours or 8.0))
+        span_goal = max(1, int(math.ceil(24.0 / length_h)))
+        open_bands = [i for i in range(k) if counts[i] > 0]
+        surplus = max(0, n - max(span_goal, len(open_bands)))
+        # How many night seats we can add above 1 without emptying a span band
+        if night and surplus > 0:
+            _give(night, min(night_want, 1 + surplus))
+        elif night and n > span_goal:
+            # Still try mild night bias if we have more bodies than one tile
+            _give(night, min(night_want, n - (span_goal - 1)))
+        elif night and not open_bands:
+            _give(night, min(night_want, n))
+        elif not night:
+            _give(evening + afternoon, min(night_want, n))
 
     # Seat multiset from target counts
     seats: List[int] = []
@@ -363,16 +644,43 @@ def _balance_day_assignments(
     assigned: List[Optional[int]] = [None] * n
     used = [False] * len(seat_avail)
 
-    def _take_seat(prefer: List[int]) -> Optional[int]:
-        for want in prefer:
+    def _rest_ok(prev_st: Optional[str], band_i: int) -> bool:
+        if min_rest <= 0 or not prev_st:
+            return True
+        try:
+            from logic.staffing_optimizer import rest_gap_minutes
+
+            gap = rest_gap_minutes(
+                str(prev_st),
+                shift_templates[int(band_i)][0],
+                float(shift_length_hours),
+                day_gap_days=1,
+            )
+            return gap >= min_rest * 60.0 - 1.0
+        except Exception:
+            return True
+
+    def _take_seat(prefer: List[int], *, prev_st: Optional[str] = None) -> Optional[int]:
+        # Prefer rest-legal seats first when min_rest binds
+        ordered = list(prefer)
+        if min_rest > 0 and prev_st:
+            ordered = [b for b in ordered if _rest_ok(prev_st, b)] + [b for b in ordered if not _rest_ok(prev_st, b)]
+        for want in ordered:
             for si, band in enumerate(seat_avail):
                 if not used[si] and band == want:
                     used[si] = True
                     return band
-        for si, band in enumerate(seat_avail):
+        # Any remaining seat — rest-legal first
+        rest_first = list(range(len(seat_avail)))
+        if min_rest > 0 and prev_st:
+            rest_first = sorted(
+                rest_first,
+                key=lambda si: (0 if (not used[si] and _rest_ok(prev_st, seat_avail[si])) else 1, si),
+            )
+        for si in rest_first:
             if not used[si]:
                 used[si] = True
-                return band
+                return seat_avail[si]
         return None
 
     # Officers with rarer home bands first so they keep home when possible
@@ -385,6 +693,7 @@ def _balance_day_assignments(
     )
     for oi in order_off:
         home_i = home_idxs[oi]
+        prev_st = prev_sts[oi] if oi < len(prev_sts) else None
         # Nearby in time-sorted pack rank space
         home_rank = inv[home_i]
         prefer_ranks = []
@@ -394,11 +703,16 @@ def _balance_day_assignments(
                 if 0 <= r < k:
                     prefer_ranks.append(r)
         prefer_bands = [order[r] for r in prefer_ranks]
-        # Fri/Sat: if home is evening-capable, try evening seats first among nearby
-        if fri_sat_window and evening:
-            eve_first = [b for b in prefer_bands if b in evening] + [b for b in prefer_bands if b not in evening]
-            prefer_bands = eve_first
-        band = _take_seat(prefer_bands)
+        # Rest-hard: if no nearby seat is rest-legal, try whole pack
+        if min_rest > 0 and prev_st and not any(_rest_ok(prev_st, b) for b in prefer_bands):
+            prefer_bands = prefer_bands + [order[r] for r in range(k) if order[r] not in prefer_bands]
+        # Window-active: prefer seats on covering bands among nearby
+        if fri_sat_window and cover_bands:
+            cov_first = [b for b in prefer_bands if b in cover_bands] + [
+                b for b in prefer_bands if b not in cover_bands
+            ]
+            prefer_bands = cov_first
+        band = _take_seat(prefer_bands, prev_st=prev_st)
         assigned[oi] = band if band is not None else home_i
 
     return [shift_templates[int(assigned[i] if assigned[i] is not None else 0)] for i in range(n)]
@@ -413,6 +727,10 @@ def assign_pack_starts_for_coverage(
     min_per_shift: int = 1,
     fri_sat_window: bool = False,
     nearby_hops: int = 1,
+    window_min: int = 0,
+    window_start: str = "",
+    window_end: str = "",
+    coverage_247: int = 0,
 ) -> List[Tuple[str, str]]:
     """Public helper for cheap filter + optimizer: pack starts with home/nearby model."""
     if n_working <= 0 or not shift_starts:
@@ -436,6 +754,11 @@ def assign_pack_starts_for_coverage(
         prefer_night=fri_sat_window,
         fri_sat_window=fri_sat_window,
         nearby_hops=nearby_hops,
+        window_min=window_min,
+        window_start=window_start,
+        window_end=window_end,
+        shift_length_hours=shift_length_hours,
+        coverage_247=int(coverage_247 or 0),
     )
 
 
@@ -542,9 +865,9 @@ def _assign_flexible_day_starts(
     n: int,
     length_hours: float,
     *,
-    min_247: int = 1,
+    min_247: int = 0,
     fri_sat_window: bool = False,
-    window_min: int = 2,
+    window_min: int = 0,
     window_start: str = "19:00",
     window_end: str = "03:00",
     hint_templates: Optional[List[Tuple[str, str]]] = None,
@@ -555,6 +878,7 @@ def _assign_flexible_day_starts(
 
     Bands move by day: Fri can load 19:00 swings; other days rebalance for 24/7.
     Uses prior day's starts for overnight continuity into this morning.
+    Defaults: min_247/window_min=0 (off) — callers pass real floors; do not invent 1/2.
     """
     if n <= 0:
         return []
@@ -570,19 +894,44 @@ def _assign_flexible_day_starts(
         if len(starts) == n:
             patterns.append(list(starts))
 
-    # Equal spacing (n independent bands — any count)
+    # Equal spacing is *one* option — not preferred over uneven packs
     for base in (0, 30, 60, 90, 120, 180, 240, 300, 360, 420, 480):
         step = max(30, (24 * 60) // max(n, 1))
         _add_pat([_min_to_hhmm(base + i * step) for i in range(n)])
 
-    # k-band packs with round-robin load (k = 2..min(6,n))
-    for k in range(2, min(6, n) + 1):
-        for base in (5 * 60, 6 * 60, 7 * 60, 8 * 60):
-            step = max(30, (24 * 60) // k)
-            bands = [_min_to_hhmm(base + i * step) for i in range(k)]
-            _add_pat([bands[i % k] for i in range(n)])
+    # Uneven steps (different gap between starts — not equal-spaced)
+    for base in (5 * 60, 6 * 60, 7 * 60):
+        for gaps in ((8 * 60, 6 * 60), (7 * 60, 5 * 60), (10 * 60, 4 * 60), (5 * 60, 5 * 60, 8 * 60)):
+            starts = []
+            t = base
+            starts.append(_min_to_hhmm(t))
+            for g in gaps:
+                t = (t + g) % (24 * 60)
+                starts.append(_min_to_hhmm(t))
+                if len(starts) >= n:
+                    break
+            if len(starts) < n:
+                # pad by stacking on last / first for thin multi-on-one-band days
+                while len(starts) < n:
+                    starts.append(starts[len(starts) % max(1, len(starts))])
+            _add_pat(starts[:n])
 
-    # Classic LE packs (bands can differ by day via choosing among these)
+    # k-band packs with round-robin load (k may be < n → fewer shifts, more doubles)
+    for k in range(1, min(6, n) + 1):
+        for base in (5 * 60, 6 * 60, 7 * 60, 8 * 60, 14 * 60, 19 * 60):
+            # equal and uneven step variants
+            for step in (max(30, (24 * 60) // max(k, 1)), 5 * 60, 7 * 60, 10 * 60):
+                bands = [_min_to_hhmm((base + i * step) % (24 * 60)) for i in range(max(k, 1))]
+                # unique-ish preserve order
+                uniq = []
+                for b in bands:
+                    if b not in uniq:
+                        uniq.append(b)
+                if not uniq:
+                    continue
+                _add_pat([uniq[i % len(uniq)] for i in range(n)])
+
+    # Named LE packs (optional shapes — day picker may choose a different set tomorrow)
     for trip in (
         ["06:00", "14:00", "22:00"],
         ["07:00", "15:00", "23:00"],
@@ -591,9 +940,17 @@ def _assign_flexible_day_starts(
         ["06:00", "14:00", "19:00", "22:00"],
         ["07:00", "15:00", "19:00", "23:00"],
         ["06:00", "12:00", "18:00", "00:00"],
+        ["06:00", "18:00"],
+        ["07:00", "19:00"],
+        ["14:00", "22:00"],
+        ["19:00", "07:00"],
     ):
         if len(trip) <= n:
             _add_pat([trip[i % len(trip)] for i in range(n)])
+        elif n < len(trip):
+            # Thin day: take a subset of the pack, not the full equal grid
+            _add_pat(list(trip[:n]))
+            _add_pat([trip[i] for i in range(0, len(trip), max(1, len(trip) // n))][:n])
 
     # Fri/Sat: window + 24/7 with overnight handoff awareness
     if fri_sat_window and wmin > 0:
@@ -752,49 +1109,126 @@ def _flsa_period_hours_ok(
     return False
 
 
-def _theoretical_min_officers(config: SimulatorConfig) -> int:
-    """Calculate the absolute mathematical minimum officers required to cover all active shift bands."""
-    if not config.min_per_shift or config.min_per_shift <= 0:
-        return 1
-
-    num_bands = len([s for s in config.shift_starts if s])
-    daily_demand = num_bands * config.min_per_shift
+def _max_work_ratio(config: SimulatorConfig) -> float:
+    """Best-case work fraction across multi-block / squad duty rings."""
     max_work_ratio = 0.0
-
     try:
         custom_patterns = _patterns_for_config(config)
         for p in custom_patterns:
             vec = p.duty_vector()
             if vec and len(vec) > 0:
-                max_work_ratio = max(max_work_ratio, sum(vec) / len(vec))
+                max_work_ratio = max(max_work_ratio, sum(1 for x in vec if x) / len(vec))
     except Exception:
         pass
 
-    if max_work_ratio == 0.0:
+    if max_work_ratio <= 0.0:
         from config import ROTATION_PRESETS
 
         preset = ROTATION_PRESETS.get(config.rotation_type)
         if preset:
-            cycle_len = preset.get("cycle_length", 1)
+            cycle_len = max(1, int(preset.get("cycle_length") or 1))
             if "squad_a_days" in preset:
                 max_work_ratio = len(preset["squad_a_days"]) / cycle_len
             elif "squad_patterns" in preset:
-                for sq_name, pattern in preset["squad_patterns"].items():
+                for _sq_name, pattern in (preset.get("squad_patterns") or {}).items():
                     if pattern and len(pattern) > 0:
-                        max_work_ratio = max(max_work_ratio, sum(pattern) / len(pattern))
+                        max_work_ratio = max(
+                            max_work_ratio,
+                            sum(1 for x in pattern if x) / len(pattern),
+                        )
+    return float(max_work_ratio) if max_work_ratio > 0.0 else 1.0
 
-    if max_work_ratio <= 0.0:
-        return 1
 
+def _window_duration_hours(start_time: str, end_time: str) -> float:
+    """Half-open window length in hours (overnight wrap OK)."""
+    try:
+        ws = _hhmm_to_min(start_time)
+        we = _hhmm_to_min(end_time)
+    except Exception:
+        return 0.0
+    if we > ws:
+        return (we - ws) / 60.0
+    if we == ws:
+        return 24.0
+    return (24 * 60 - ws + we) / 60.0
+
+
+def _window_weekly_person_hours(config: SimulatorConfig) -> float:
+    """Sum of (min_officers × window_hours × days_per_week) for enabled windows."""
+    if not getattr(config, "use_extra_windows", False) or not config.extra_windows:
+        return 0.0
+    from logic.coverage_timeline import normalize_weekdays
+
+    total = 0.0
+    for w in config.extra_windows or []:
+        if not isinstance(w, dict) or w.get("enabled") is False:
+            continue
+        try:
+            need = int(w.get("min_officers") or 0)
+        except (TypeError, ValueError):
+            need = 0
+        if need <= 0:
+            continue
+        st = str(w.get("start_time") or w.get("start") or "").strip()
+        en = str(w.get("end_time") or w.get("end") or "").strip()
+        if not st or not en:
+            continue
+        hours = _window_duration_hours(st, en)
+        if hours <= 0:
+            continue
+        wds = normalize_weekdays(w.get("weekday", w.get("weekdays", w.get("dow"))))
+        days = 7 if wds is None else max(1, len(set(wds)))
+        total += float(need) * hours * float(days)
+    return total
+
+
+def _concurrent_body_floor(config: SimulatorConfig) -> int:
+    """
+    Concurrent ON-body demand from hard coverage floors.
+
+    min_per_shift applies to *used* starts only (thin multi-block days may run
+    fewer bands) — do **not** multiply by full pack band count.
+    """
     import math
 
-    if config.coverage_247 and config.coverage_247 > 0:
-        shift_length = config.shift_length_hours or 8.0
-        cov_min = math.ceil((24.0 * config.coverage_247) / (shift_length * max_work_ratio))
-        daily_demand = max(daily_demand, cov_min)
+    daily_bodies = 0
+    min_ps = max(0, int(config.min_per_shift or 0))
+    if min_ps > 0:
+        daily_bodies = max(daily_bodies, min_ps)
 
-    # Do not invent Fri/Sat headcount here — night mins live in coverage windows / config.
-    return max(1, math.ceil(daily_demand / max_work_ratio))
+    if config.coverage_247 and int(config.coverage_247 or 0) > 0:
+        shift_length = float(config.shift_length_hours or 8.0)
+        if shift_length > 0:
+            bodies_247 = max(1, math.ceil(24.0 / shift_length)) * int(config.coverage_247)
+            daily_bodies = max(daily_bodies, bodies_247)
+
+    if getattr(config, "use_extra_windows", False) and config.extra_windows:
+        for w in config.extra_windows or []:
+            if not isinstance(w, dict) or not w.get("enabled", True):
+                continue
+            try:
+                need = int(w.get("min_officers") or 0)
+            except (TypeError, ValueError):
+                need = 0
+            if need > 0:
+                daily_bodies = max(daily_bodies, need)
+
+    return int(daily_bodies)
+
+
+def _theoretical_min_officers(config: SimulatorConfig) -> int:
+    """
+    Lower-bound headcount: concurrent body floor ÷ max work fraction.
+
+    Average daily ON = N × work_frac ≥ body floor (phase-invariant bound).
+    """
+    import math
+
+    daily_bodies = _concurrent_body_floor(config)
+    if daily_bodies <= 0:
+        return 1
+    work_frac = _max_work_ratio(config)
+    return max(1, math.ceil(float(daily_bodies) / float(work_frac)))
 
 
 def _get_all_duty_vectors(config: SimulatorConfig) -> List[List[bool]]:
@@ -825,6 +1259,7 @@ def _get_all_duty_vectors(config: SimulatorConfig) -> List[List[bool]]:
 
 def _pre_simulation_fast_fail(config: SimulatorConfig) -> Tuple[bool, str]:
     """Check pattern-intrinsic hard constraints that mathematically cannot pass."""
+    import math
 
     # 1. Structural 24/7 check
     if getattr(config, "coverage_247", 0) > 0:
@@ -843,43 +1278,127 @@ def _pre_simulation_fast_fail(config: SimulatorConfig) -> Tuple[bool, str]:
             if not all(covered):
                 return True, "Shift bands leave structural gaps; 24/7 coverage is impossible."
 
+    # 1a2. Synchronized OFF days: single-ring presets without phase stagger cannot 24/7
+    if int(getattr(config, "coverage_247", 0) or 0) > 0:
+        try:
+            from config import ROTATION_PRESETS as _RP
+
+            _pre = _RP.get(config.rotation_type) or {}
+            if (
+                _pre
+                and _squad_union_has_off_day(_pre)
+                and not bool(getattr(config, "stagger_phases", True))
+                and not getattr(config, "rotation_variations", None)
+            ):
+                return (
+                    True,
+                    "Rotation leaves cycle day(s) with all officers OFF; "
+                    "enable phase stagger or use complementary squads for 24/7.",
+                )
+        except Exception:
+            pass
+
+    # 1b. Headcount vs 24/7 concurrent floor (avg ON = N×work_frac).
+    # Runs for any fixed N>0 (auto_min_officers only gates blank-N search, not this).
+    # Do **not** hard-abort on window mins alone — impossible windows still run so
+    # metrics (extra_window_failures) and optimizer near-misses stay populated.
+    n_off = int(getattr(config, "num_officers", 0) or 0)
+    if n_off > 0 and int(getattr(config, "coverage_247", 0) or 0) > 0:
+        shift_length = float(config.shift_length_hours or 8.0)
+        bodies_247 = (
+            max(1, math.ceil(24.0 / shift_length)) * int(config.coverage_247)
+            if shift_length > 0
+            else int(config.coverage_247)
+        )
+        if n_off < bodies_247:
+            return (
+                True,
+                f"Officers ({n_off}) < 24/7 concurrent body floor ({bodies_247}).",
+            )
+        work_frac = _max_work_ratio(config)
+        avg_on = float(n_off) * float(work_frac)
+        if avg_on + 1e-9 < float(bodies_247):
+            need_n = max(1, math.ceil(float(bodies_247) / float(work_frac)))
+            return (
+                True,
+                f"Avg daily ON ≤{avg_on:.1f} (work frac {work_frac:.2%}) "
+                f"but 24/7 needs {bodies_247} bodies — try ≥{need_n} officers.",
+            )
+
     vectors = _get_all_duty_vectors(config)
     if not vectors:
         return False, ""
 
-    # 2. Min Rest Math Bounds check
+    # 2. Min rest — best rest between consecutive ON days across pack starts
     min_rest = float(getattr(config, "min_rest_hours", 0) or 0)
     if min_rest > 0:
-        shift_templates = generate_shift_templates(
-            config.shift_length_hours or 8.0,
-            config.shift_starts,
-            use_department_shifts=config.apply_department_rules and not config.shift_starts,
-        )
-        if shift_templates:
-            start_mins = [_hhmm_to_min(st) for st, _ in shift_templates]
-            max_st = max(start_mins)
-            min_st = min(start_mins)
-            duration_m = int((config.shift_length_hours or 8.0) * 60)
-            for vec in vectors:
-                if not vec:
-                    continue
-                doubled = vec + vec
-                streak = 0
-                max_k = 0
-                for w in doubled:
-                    if w:
-                        streak += 1
-                        max_k = max(max_k, streak)
-                    else:
-                        streak = 0
-                if max_k >= len(vec) and len(vec) > 0:
-                    max_avg_rest = 24 * 60 - duration_m
-                    if min_rest * 60 > max_avg_rest + 1:
-                        return True, f"Rotation works every day; impossible to maintain {min_rest}h rest."
-                elif max_k > 1:
-                    max_avg_rest = (max_st - min_st) / (max_k - 1) + 24 * 60 - duration_m
-                    if min_rest * 60 > max_avg_rest + 1:
-                        return True, f"Rotation streak of {max_k} days mathematically violates min {min_rest}h rest."
+        has_adjacent = False
+        for vec in vectors:
+            if not vec:
+                continue
+            n = len(vec)
+            for i in range(2 * n - 1):
+                if vec[i % n] and vec[(i + 1) % n]:
+                    has_adjacent = True
+                    break
+            if has_adjacent:
+                break
+        if has_adjacent:
+            starts = [s for s in (config.shift_starts or []) if s]
+            if not starts:
+                try:
+                    starts = [
+                        st
+                        for st, _ in generate_shift_templates(
+                            config.shift_length_hours or 8.0,
+                            None,
+                            use_department_shifts=bool(config.apply_department_rules),
+                        )
+                    ]
+                except Exception:
+                    starts = []
+            length = float(config.shift_length_hours or 8.0)
+            try:
+                from logic.staffing_optimizer import max_rest_minutes_for_pack
+
+                hops = max(0, int(getattr(config, "nearby_start_hops", 1) or 0))
+                max_r = max_rest_minutes_for_pack(
+                    starts or ["06:00"],
+                    length,
+                    day_gap_days=1,
+                    nearby_hops=hops,
+                )
+            except Exception:
+                # Same-start rest only
+                max_r = max(0, 24 * 60 - int(round(length * 60)))
+            if max_r < min_rest * 60.0 - 1.0:
+                return (
+                    True,
+                    f"Start pack cannot leave {min_rest:g}h rest between consecutive ON days "
+                    f"(best ≈{max_r / 60.0:.1f}h).",
+                )
+            # 24/7 staffs every band every day — each start must transition to *some*
+            # next-day start with enough rest (overnight→overnight often caps at 16h @8h).
+            if int(getattr(config, "coverage_247", 0) or 0) > 0 and starts:
+                try:
+                    from logic.staffing_optimizer import rest_gap_minutes
+
+                    worst_best = 10**9
+                    worst_prev = starts[0]
+                    for prev in starts:
+                        best = max(rest_gap_minutes(prev, curr, length, day_gap_days=1) for curr in starts)
+                        if best < worst_best:
+                            worst_best = best
+                            worst_prev = prev
+                    if worst_best < min_rest * 60.0 - 1.0:
+                        return (
+                            True,
+                            f"24/7 needs start {worst_prev} every day; best rest to any "
+                            f"pack start next day is ≈{worst_best / 60.0:.1f}h "
+                            f"(need {min_rest:g}h).",
+                        )
+                except Exception:
+                    pass
 
     max_c = int(getattr(config, "max_consecutive_work_days", 0) or 0)
     if max_c > 0:
@@ -899,20 +1418,29 @@ def _pre_simulation_fast_fail(config: SimulatorConfig) -> Tuple[bool, str]:
     # FLSA is counted in Phase 3 with flsa_violations metrics — do not hard-abort here
     # (empty metrics break detect/report paths and unit proofs).
 
+    # Annual hard: envelope across duty rings (mixed multi-block can hit mid-band)
     if getattr(config, "annual_hours_hard", False):
-        from logic.rotation_patterns import annual_hours_within_band
-
+        length = float(config.shift_length_hours or 8.0)
+        projections: List[float] = []
         for vec in vectors:
             if not vec:
                 continue
-            working_days = sum(vec)
+            working_days = sum(1 for x in vec if x)
             cycle_length = len(vec)
-            projected = (working_days / cycle_length) * 365.25 * (config.shift_length_hours or 8.0)
-            ok_band, _, _, _ = annual_hours_within_band(
-                projected, config.annual_hours_target, variance_hours=config.annual_hours_variance
-            )
-            if not ok_band:
-                return True, "Rotation mathematically violates annual hours constraints."
+            projections.append(round((working_days / cycle_length) * 365.25 * length, 1))
+        if projections:
+            target = float(config.annual_hours_target)
+            band = float(getattr(config, "annual_hours_variance", 0) or 0)
+            if band <= 0:
+                band = abs(target) * 0.02
+            lo, hi = min(projections), max(projections)
+            best = min(projections, key=lambda h: abs(h - target))
+            can_hit = (lo - band) <= target <= (hi + band) or abs(best - target) <= band + 1.0
+            if not can_hit:
+                return (
+                    True,
+                    f"Duty annual hours [{lo:.0f}–{hi:.0f}] cannot hit {target:g}±{band:g}.",
+                )
 
     return False, ""
 
@@ -1045,24 +1573,66 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
         cycle_length = custom_patterns[0].cycle_length
         n_slots = max(len(slots), 1)
         n_pat = len(custom_patterns)
-        slot_pat_idx = list(range(n_slots))
-        if config.pattern_slot_map and len(config.pattern_slot_map) >= n_slots:
-            slot_pat_idx = [int(config.pattern_slot_map[i]) % n_pat for i in range(n_slots)]
+        # Pad short pattern maps with round-robin (do not silently ignore short maps)
+        if config.pattern_slot_map:
+            slot_pat_idx = [
+                int(config.pattern_slot_map[i]) % n_pat if i < len(config.pattern_slot_map) else (i % n_pat)
+                for i in range(n_slots)
+            ]
         else:
             slot_pat_idx = [i % n_pat for i in range(n_slots)]
         sim_start = config.sim_start_date or date.today()
         best_phases = [0] * n_slots
-        if config.phase_overrides is not None and len(config.phase_overrides) >= n_slots:
-            best_phases = [int(config.phase_overrides[i]) % max(cycle_length, 1) for i in range(n_slots)]
+        # Pad short phase lists with even stagger for remaining slots
+        if config.phase_overrides is not None:
+            step0 = max(1, cycle_length // max(n_slots, 1))
+            for i in range(n_slots):
+                if i < len(config.phase_overrides):
+                    best_phases[i] = int(config.phase_overrides[i]) % max(cycle_length, 1)
+                else:
+                    best_phases[i] = (i * step0) % max(cycle_length, 1)
         elif config.stagger_phases and n_slots > 1:
+            import math as _math_phase
+
             best_score = -(10**9)
-            # Score using real calendar weekdays over the sim window so Fri/Sat
-            # night windows get enough bodies (need ≥5 for 1+2+2 on 8h three-band).
+            # Concurrent body floors from user constraints only (not pack_bands×min_ps)
+            everyday_floor = 0
+            if int(config.coverage_247 or 0) > 0:
+                _L = float(config.shift_length_hours or 8.0)
+                if _L > 0:
+                    everyday_floor = max(
+                        everyday_floor,
+                        max(1, _math_phase.ceil(24.0 / _L)) * int(config.coverage_247),
+                    )
+            _min_ps = int(config.min_per_shift or 0)
+            if _min_ps > 0:
+                # Used-start floor only — thin multi-block days may run fewer bands
+                everyday_floor = max(everyday_floor, _min_ps)
+            everyday_floor = min(everyday_floor, n_slots) if everyday_floor > 0 else 0
+            window_floor_by_wd: Dict[int, int] = {}
+            if config.use_extra_windows and config.extra_windows:
+                from logic.coverage_timeline import normalize_weekdays
+
+                for w in config.extra_windows:
+                    if not isinstance(w, dict) or w.get("enabled") is False:
+                        continue
+                    try:
+                        mo = int(w.get("min_officers") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if mo <= 0:
+                        continue
+                    wds = normalize_weekdays(w.get("weekday", w.get("weekdays", w.get("dow"))))
+                    if wds is None:
+                        everyday_floor = max(everyday_floor, min(mo, n_slots))
+                    else:
+                        for wi in wds:
+                            window_floor_by_wd[wi] = max(window_floor_by_wd.get(wi, 0), min(mo, n_slots))
             for step in range(1, min(4, cycle_length // 2 + 1)):
                 for offset in range(0, cycle_length, max(1, cycle_length // 4)):
                     trial = [((i * step) + offset) % cycle_length for i in range(n_slots)]
                     day_counts = []
-                    fri_sat_penalty = 0
+                    body_penalty = 0
                     for day_offset in range(max(config.simulation_days, cycle_length)):
                         cycle_day = (day_offset % cycle_length) + 1
                         working = 0
@@ -1072,23 +1642,26 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                                 working += 1
                         day_counts.append(working)
                         cal = sim_start + timedelta(days=day_offset)
-                        if cal.weekday() in (4, 5) and working < 5:
-                            fri_sat_penalty += (5 - working) * 200
+                        need = everyday_floor
+                        if cal.weekday() in window_floor_by_wd:
+                            need = max(need, window_floor_by_wd[cal.weekday()])
+                        if need > 0 and working < need:
+                            body_penalty += (need - working) * 200
                     score = (
                         min(day_counts) * 1000
                         + sorted(day_counts)[min(1, len(day_counts) - 1)] * 50
                         - (max(day_counts) - min(day_counts))
-                        - fri_sat_penalty
+                        - body_penalty
                     )
                     if score > best_score:
                         best_score = score
                         best_phases = trial
         for i, slot in enumerate(slots):
             base_p = custom_patterns[slot_pat_idx[i]]
-            if config.phase_overrides is not None:
+            if config.phase_overrides is not None or config.stagger_phases:
                 phase = best_phases[i]
             else:
-                phase = best_phases[i] if config.stagger_phases else 0
+                phase = 0
             slot_patterns.append(base_p.with_phase(phase))
         squad_a_days = set()
     elif config.apply_department_rules:
@@ -1103,6 +1676,15 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
         sim_start = config.sim_start_date or date.today()
 
     per_slot_work_flags: List[List[bool]] = [[] for _ in slots]
+    # Squad-path duty phases (stagger single-pattern rings so OFF days are not global)
+    squad_phases: List[int] = [0] * len(slots)
+    if not custom_patterns:
+        squad_phases = _squad_phase_offsets(
+            preset,
+            len(slots),
+            stagger=bool(getattr(config, "stagger_phases", True)),
+            phase_overrides=config.phase_overrides if not config.apply_department_rules else None,
+        )
     # --- PHASE 1: Pure Math Evaluation ---
     for day_offset in range(config.simulation_days):
         cycle_day = (day_offset % cycle_length) + 1
@@ -1112,9 +1694,16 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             elif config.apply_department_rules:
                 from logic.rotation_config import is_squad_working
 
+                # Department live rotation: honor real squad calendars (no synthetic phase)
                 working = is_squad_working(slot.squad, cycle_day, preset)
             else:
-                working = _squad_working(config.rotation_type, slot.squad, cycle_day, preset)
+                working = _squad_working(
+                    config.rotation_type,
+                    slot.squad,
+                    cycle_day,
+                    preset,
+                    phase=squad_phases[si] if si < len(squad_phases) else 0,
+                )
             per_slot_work_flags[si].append(working)
             if working:
                 slot.work_days_in_sim += 1
@@ -1181,9 +1770,10 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                 "hard_constraints_ok": False,
                 "flsa_violations": 0,
                 "flsa_threshold_hours": 0.0,
-                "coverage_247_ok": True,
-                "coverage_247_failures": 0,
-                "extra_window_failures": 0,
+                # Not evaluated on annual-only phase-1 fail — never claim OK
+                "coverage_247_ok": None,
+                "coverage_247_failures": None,
+                "extra_window_failures": None,
                 "extra_window_checks": 0,
                 "extra_windows_active": 0,
                 "annual_band_outside": annual_band_outside,
@@ -1198,8 +1788,8 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                 "offday_coverage_assignments": 0,
                 "min_rest_hours": float(getattr(config, "min_rest_hours", 0) or 0),
                 "max_consecutive_work_days": int(getattr(config, "max_consecutive_work_days", 0) or 0),
-                "rest_failures": 0,
-                "consecutive_work_failures": 0,
+                "rest_failures": None,
+                "consecutive_work_failures": None,
             }
             return SimulatorResult(
                 success=True,
@@ -1209,9 +1799,9 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                 officer_slots=slots,
                 coverage_by_day=[],
                 metrics=metrics,
-                suggestions={},
+                suggestions=[],
             )
-    # Rust path only when not using custom multi-block / FLSA hard / 24/7 / extra windows
+    # Rust path only when not using features the Rust sim does not evaluate
     use_rust = (
         rust_bridge
         and rust_bridge.available()
@@ -1220,6 +1810,9 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
         and not config.coverage_247
         and not (config.use_extra_windows and config.extra_windows)
         and not float(getattr(config, "min_rest_hours", 0) or 0) > 0
+        and not int(getattr(config, "max_consecutive_work_days", 0) or 0) > 0
+        and not bool(getattr(config, "allow_offday_coverage", False))
+        and not bool(getattr(config, "flexible_daily_starts", False))
     )
     if use_rust:
         rust_config = {
@@ -1291,7 +1884,7 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             officer_slots=slots,
             coverage_by_day=[],
             metrics=metrics,
-            suggestions={},
+            suggestions=[],
         )
 
     # --- PHASE 2: Start Times & Gaps ---
@@ -1310,43 +1903,78 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             working_indices.append(si)
 
         # Daily start assignment: flexible half-hour grid OR pack rebalance with
-        # home + nearby hops (e.g. home 19:00 may work 14:00 / 22:00 that day).
-        fri_sat = target.weekday() in (4, 5)
+        # home + nearby hops from the user's pack (not a fixed 19:00 example).
         win_min = 0
+        win_start = "19:00"
+        win_end = "03:00"
+        day_windows: List[Dict] = []
         if config.use_extra_windows and config.extra_windows:
+            from logic.coverage_timeline import normalize_weekdays
+
             for w in config.extra_windows:
                 if not isinstance(w, dict) or w.get("enabled") is False:
                     continue
                 try:
-                    wd = w.get("weekday")
-                    if wd is not None and int(wd) != target.weekday():
+                    wds = normalize_weekdays(w.get("weekday", w.get("weekdays", w.get("dow"))))
+                    if wds is not None and target.weekday() not in wds:
                         continue
-                    win_min = max(win_min, int(w.get("min_officers") or 2))
+                    mo = int(w.get("min_officers") or 0)
+                    if mo <= 0:
+                        continue
+                    st = (w.get("start_time") or w.get("start") or "").strip()
+                    en = (w.get("end_time") or w.get("end") or "").strip()
+                    if st and en:
+                        day_windows.append({"min_officers": mo, "start_time": st, "end_time": en})
+                    if mo >= win_min:
+                        win_min = mo
+                        if st and en:
+                            win_start, win_end = st, en
                 except (TypeError, ValueError):
                     pass
+        window_active = win_min > 0 or bool(day_windows)
         nearby_hops = max(0, int(getattr(config, "nearby_start_hops", 1) or 0))
-        if getattr(config, "flexible_daily_starts", False) and working_officers:
+        # Pack path rebalances per day (subset of pack when thin; nearby hops).
+        # Equal full-pack spacing is not required. Explicit flexible_daily_starts
+        # uses the half-hour grid for freer day-to-day clocks.
+        use_flex = bool(getattr(config, "flexible_daily_starts", False))
+        if use_flex and working_officers:
+            # min_247 = concurrent occupancy floor (24/7 min officers every moment),
+            # not pack-bands×min_ps and not min_per_shift (per used start).
             day_bands = _assign_flexible_day_starts(
                 len(working_officers),
                 config.shift_length_hours,
-                min_247=max(int(config.coverage_247 or 0), int(config.min_per_shift or 0), 1)
-                if (config.coverage_247 or config.min_per_shift)
-                else 0,
-                fri_sat_window=win_min > 0,
+                min_247=int(config.coverage_247 or 0),
+                fri_sat_window=window_active,
                 window_min=win_min,
-                window_start="19:00",
-                window_end="03:00",
+                window_start=win_start,
+                window_end=win_end,
                 hint_templates=shift_templates,
                 prev_starts=prev_day_starts,
             )
         else:
+            # Prior start for consecutive ON slots (rest-aware seat pick)
+            prev_work_starts: List[Optional[str]] = []
+            for si in working_indices:
+                hist = _slot_assigns.get(si) or []
+                if hist and hist[-1][0] == target - timedelta(days=1):
+                    prev_work_starts.append(hist[-1][1])
+                else:
+                    prev_work_starts.append(None)
             day_bands = _balance_day_assignments(
                 working_officers,
                 shift_templates,
                 min_per_shift=config.min_per_shift,
                 prefer_night=is_high_risk_night(target),
-                fri_sat_window=win_min > 0,
+                fri_sat_window=window_active,
                 nearby_hops=nearby_hops,
+                window_min=win_min,
+                window_start=win_start,
+                window_end=win_end,
+                shift_length_hours=config.shift_length_hours,
+                coverage_247=int(config.coverage_247 or 0),
+                active_windows=day_windows or None,
+                min_rest_hours=float(getattr(config, "min_rest_hours", 0) or 0),
+                prev_work_starts=prev_work_starts,
             )
         # Track used starts only (empty fixed templates are not gaps when flexible)
         used_counts: Dict[str, int] = {}
@@ -1359,33 +1987,92 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             today_starts.append(st)
 
         # Off-day coverage: multi-block OFF officers can start at home/nearby when
-        # work-day body count alone cannot staff min window / 24/7 floors.
+        # work-day body count or *minute occupancy* cannot staff 24/7 / window floors.
         offday_adds = 0
         if getattr(config, "allow_offday_coverage", False) and custom_patterns and shift_templates:
-            off_slots = [slots[si] for si in range(len(slots)) if si not in working_indices]
-            need_bodies = max(
-                int(config.coverage_247 or 0),
-                int(config.min_per_shift or 0),
-                int(win_min),
-            )
-            short = max(0, need_bodies - len(working_officers))
-            # Also pull when Fri/Sat evening seats thin vs window_min
-            evening_starts = {
-                t[0]
-                for t in shift_templates
-                if _hhmm_to_min(t[0]) >= 18 * 60
-                or _hhmm_to_min(t[0]) < 6 * 60
-                or 12 * 60 <= _hhmm_to_min(t[0]) < 20 * 60
-            }
-            eve_on = sum(1 for s in today_starts if s in evening_starts or _hhmm_to_min(s) >= 14 * 60)
-            if win_min > 0:
-                short = max(short, win_min - min(eve_on, win_min) if eve_on < win_min else 0)
-                # Prefer dedicated 19:00-class starts for window
-                n_19 = sum(1 for s in today_starts if abs(_hhmm_to_min(s) - 19 * 60) <= 30)
-                short = max(short, win_min - n_19 if n_19 < win_min else 0)
-            for off_slot in off_slots:
+            _L = float(config.shift_length_hours or 8.0)
+            cov247 = int(config.coverage_247 or 0)
+
+            def _body_short() -> int:
+                need = 0
+                if cov247 > 0 and _L > 0:
+                    need = max(need, max(1, math.ceil(24.0 / _L)) * cov247)
+                if int(config.min_per_shift or 0) > 0:
+                    need = max(need, int(config.min_per_shift))
+                if int(win_min or 0) > 0:
+                    need = max(need, int(win_min))
+                n_on = len(working_officers) + offday_adds
+                return max(0, need - n_on)
+
+            def _occ_short(starts: List[str]) -> int:
+                """How far min half-hour occupancy is below 24/7 floor."""
+                if cov247 <= 0 or not starts:
+                    return cov247 if cov247 > 0 else 0
+                bins = _coverage_bins(starts, _L, prev_starts=prev_day_starts)
+                if not bins:
+                    return cov247
+                return max(0, cov247 - min(bins))
+
+            def _win_short(starts: List[str]) -> int:
+                if win_min <= 0 or not window_active:
+                    return 0
+                ws = _hhmm_to_min(win_start) if win_start else 19 * 60
+                we = _hhmm_to_min(win_end) if win_end else 3 * 60
+                bins = _coverage_bins(starts, _L, prev_starts=prev_day_starts)
+                if not bins:
+                    return win_min
+                if we > ws:
+                    idxs = list(range(ws // 30, max(ws // 30 + 1, (we + 29) // 30)))
+                else:
+                    idxs = list(range(ws // 30, 48)) + list(range(0, max(1, (we + 29) // 30)))
+                occ = min(bins[i % 48] for i in idxs) if idxs else 0
+                return max(0, win_min - occ)
+
+            def _total_short(starts: List[str]) -> int:
+                return max(_body_short(), _occ_short(starts), _win_short(starts))
+
+            def _thin_bin_start(starts: List[str]) -> Optional[str]:
+                """Prefer a pack start that covers the thinnest 24/7 or window bin."""
+                bins = _coverage_bins(starts, _L, prev_starts=prev_day_starts)
+                if not bins:
+                    return None
+                # Target the worst bin under floor
+                worst_i = min(range(48), key=lambda i: bins[i])
+                if cov247 > 0 and bins[worst_i] >= cov247 and _win_short(starts) <= 0:
+                    return None
+                if _win_short(starts) > 0 and win_start:
+                    # Prefer window cover first when window short
+                    worst_i = None
+                    ws = _hhmm_to_min(win_start)
+                    we = _hhmm_to_min(win_end) if win_end else 3 * 60
+                    if we > ws:
+                        idxs = list(range(ws // 30, max(ws // 30 + 1, (we + 29) // 30)))
+                    else:
+                        idxs = list(range(ws // 30, 48)) + list(range(0, max(1, (we + 29) // 30)))
+                    if idxs:
+                        worst_i = min(idxs, key=lambda i: bins[i % 48]) % 48
+                if worst_i is None:
+                    worst_i = min(range(48), key=lambda i: bins[i])
+                target_m = worst_i * 30
+                length_m = max(30, int(round(_L * 60)))
+                best_st, best_d = None, 10**9
+                for st, _en in shift_templates:
+                    sm = _hhmm_to_min(st)
+                    # Does this start cover target minute on this calendar day?
+                    rel = (target_m - sm) % (24 * 60)
+                    if rel < length_m and sm + rel < 24 * 60:
+                        d = rel  # prefer starts that cover soon after begin
+                        if d < best_d:
+                            best_d, best_st = d, st
+                return best_st
+
+            short = _total_short(today_starts)
+            off_indices = [si for si in range(len(slots)) if si not in working_indices]
+            for si in off_indices:
+                short = _total_short(today_starts)
                 if short <= 0:
                     break
+                off_slot = slots[si]
                 home = off_slot.shift_start or shift_templates[0][0]
                 home_i = _pack_band_index(home, shift_templates)
                 order = sorted(
@@ -1401,43 +2088,112 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                     for sign in (0,) if d == 0 else (-1, 1):
                         r = (home_rank + sign * d) % len(shift_templates)
                         prefer.append(order[r])
-                # Fri/Sat: bias toward evening band among nearby
-                if fri_sat and win_min > 0:
+                # Prefer start covering thinnest occupancy bin (247 / window)
+                thin_st = _thin_bin_start(today_starts)
+                if thin_st:
+                    prefer = sorted(
+                        prefer,
+                        key=lambda i: (
+                            0 if shift_templates[i][0] == thin_st else 1,
+                            abs(_hhmm_to_min(shift_templates[i][0]) - _hhmm_to_min(thin_st)),
+                        ),
+                    )
+                elif window_active and win_min > 0:
+                    win_anchor = _hhmm_to_min(win_start) if win_start else 19 * 60
                     prefer = sorted(
                         prefer,
                         key=lambda i: (
                             0
-                            if abs(_hhmm_to_min(shift_templates[i][0]) - 19 * 60) <= 30
+                            if abs(_hhmm_to_min(shift_templates[i][0]) - win_anchor) <= 30
                             else 1
-                            if _hhmm_to_min(shift_templates[i][0]) >= 14 * 60
+                            if abs(_hhmm_to_min(shift_templates[i][0]) - win_anchor) <= 5 * 60
                             else 2,
-                            abs(_hhmm_to_min(shift_templates[i][0]) - 19 * 60),
+                            abs(_hhmm_to_min(shift_templates[i][0]) - win_anchor),
                         ),
                     )
+                # Rest-aware: if called in after yesterday ON, prefer legal next start
+                min_rest_od = float(getattr(config, "min_rest_hours", 0) or 0)
+                hist = _slot_assigns.get(si) or []
+                prev_st_od = hist[-1][1] if hist and hist[-1][0] == target - timedelta(days=1) else None
+                if min_rest_od > 0 and prev_st_od:
+                    try:
+                        from logic.staffing_optimizer import rest_gap_minutes
+
+                        def _od_rest_ok(bi: int) -> bool:
+                            g = rest_gap_minutes(
+                                prev_st_od,
+                                shift_templates[bi][0],
+                                _L,
+                                day_gap_days=1,
+                            )
+                            return g >= min_rest_od * 60.0 - 1.0
+
+                        legal = [bi for bi in prefer if _od_rest_ok(bi)]
+                        if legal:
+                            prefer = legal + [bi for bi in prefer if bi not in legal]
+                        else:
+                            # expand to full pack for a legal rest seat
+                            all_i = list(range(len(shift_templates)))
+                            legal_all = [bi for bi in all_i if _od_rest_ok(bi)]
+                            if legal_all:
+                                prefer = legal_all + prefer
+                    except Exception:
+                        pass
                 pick_i = prefer[0] if prefer else home_i
                 st, en = shift_templates[pick_i]
                 day_assignments.append((target, st, en))
+                # Count for rest / FLSA / consecutive — was coverage-only before
+                _slot_assigns[si].append((target, st, en))
+                per_slot_work_flags[si][day_offset] = True
+                slots[si].work_days_in_sim += 1
                 today_starts.append(st)
                 used_counts[st] = used_counts.get(st, 0) + 1
                 shift_counts[st] = shift_counts.get(st, 0) + 1
                 offday_adds += 1
-                short -= 1
             offday_coverage_total += offday_adds
 
         prev_day_starts = today_starts
 
-        day_min = min(used_counts.values()) if used_counts else 0
-        day_max = max(used_counts.values()) if used_counts else 0
-        min_coverage = min(min_coverage, day_min)
+        # Min/max across *used* starts only. Rotation days with fewer officers
+        # may run fewer shifts — empty pack slots are not failures (24/7/windows are).
+        used_vals = [int(c) for c in used_counts.values() if int(c) > 0]
+        day_min = min(used_vals) if used_vals else 0
+        day_max = max(used_vals) if used_vals else 0
+        min_coverage = min(min_coverage, day_min) if used_vals else min_coverage
         max_coverage = max(max_coverage, day_max)
 
-        # Band floor gaps check
-        # Each covered band must have at least min_per_shift officers.
-        n_working_today = len(working_officers)
-        if config.min_per_shift > 0 and n_working_today < config.min_per_shift:
-            gap = config.min_per_shift - n_working_today
-            gap_counter[(day_offset, "total")] = gap_counter.get((day_offset, "total"), 0) + gap
-            total_gap_hours += gap * config.shift_length_hours
+        # Band floor: only for starts *run today*. Do not force every pack band
+        # every day (multi-block thins the roster; starts may differ by day).
+        high_risk = is_high_risk_night(target)
+        if config.min_per_shift > 0:
+            if used_counts:
+                for st, count in used_counts.items():
+                    c = int(count)
+                    if c > 0 and c < config.min_per_shift:
+                        gap = config.min_per_shift - c
+                        gap_counter[(day_offset, st)] = gap_counter.get((day_offset, st), 0) + gap
+                        total_gap_hours += gap * config.shift_length_hours
+            else:
+                # Nobody working — only a gap if a minimum was required at all
+                n_working_today = len(working_officers) + offday_adds
+                if n_working_today < config.min_per_shift:
+                    gap = config.min_per_shift - n_working_today
+                    gap_counter[(day_offset, "total")] = gap_counter.get((day_offset, "total"), 0) + gap
+                    total_gap_hours += gap * config.shift_length_hours
+
+        # High-risk night: shortfalls only on night starts that ran today
+        if high_risk and config.night_minimum and config.night_minimum > 0:
+            for st, count in used_counts.items():
+                if not _is_night_shift_start(st):
+                    continue
+                c = int(count)
+                if c <= 0:
+                    continue
+                required = int(config.night_minimum)
+                if config.apply_department_rules:
+                    required = max(required, int(config.min_per_shift or 0))
+                if c < required:
+                    night_risk_gaps += 1
 
         coverage_by_day.append(
             {
@@ -1446,24 +2202,89 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                 "shift_counts": shift_counts,
                 "working_officers": len(working_officers),
                 "min_shift_coverage": day_min,
-                "high_risk_night": is_high_risk_night(target),
+                "high_risk_night": high_risk,
             }
         )
 
-    # (Annual hours calculated in Phase 1)
+    # Off-day OT adds real work days — recompute annual from flags (not pattern only)
+    if offday_coverage_total > 0:
+        annual_factor = 365.0 / max(config.simulation_days, 1)
+        for si, slot in enumerate(slots):
+            work_days = sum(1 for f in per_slot_work_flags[si] if f)
+            slot.work_days_in_sim = work_days
+            slot.projected_annual_hours = round(work_days * hours_per_work_day * annual_factor, 1)
+        hours_list = [s.projected_annual_hours for s in slots]
+        avg_hours = sum(hours_list) / len(hours_list) if hours_list else 0
+        hours_range_ratio = 0.0
+        if hours_list and avg_hours:
+            hours_range_ratio = (max(hours_list) - min(hours_list)) / avg_hours
+        annual_band_outside = 0
+        annual_mean_outside = 0
+        annual_unfair = 0
+        annual_hours_spread = 0.0
+        for slot in slots:
+            ok_band, _lo, _hi, _dist = annual_hours_within_band(
+                slot.projected_annual_hours,
+                config.annual_hours_target,
+                variance_hours=config.annual_hours_variance,
+            )
+            if not ok_band:
+                annual_band_outside += 1
+        if hours_list:
+            annual_hours_spread = round(max(hours_list) - min(hours_list), 1)
+            ok_mean, _, _, _ = annual_hours_within_band(
+                avg_hours,
+                config.annual_hours_target,
+                variance_hours=config.annual_hours_variance,
+            )
+            if not ok_mean:
+                annual_mean_outside = 1
+            max_spread = max(float(config.annual_hours_variance or 0) * 2.0, 40.0)
+            if annual_hours_spread > max_spread + 1e-6:
+                annual_unfair = 1
 
     slots_per_day = len(shift_templates)
-    weekly_hours_needed = 24 * 7 * max(config.min_per_shift, config.coverage_247 or 1)
+    # FTE estimate: concurrent person-hours (24/7 floor), pack×min_ps×length,
+    # or window person-hours. Do not mix min_per_shift with concurrent occupancy.
+    # Window-only must not invent a full 24×7×1 floor (was overstating FTE badly).
+    if int(config.coverage_247 or 0) > 0:
+        weekly_hours_needed = 24.0 * 7 * int(config.coverage_247)
+        fte_basis = "24/7"
+    elif int(config.min_per_shift or 0) > 0 and shift_templates:
+        weekly_hours_needed = (
+            len(shift_templates) * int(config.min_per_shift) * float(config.shift_length_hours or 8.0) * 7
+        )
+        fte_basis = "min_per_shift"
+    elif getattr(config, "use_extra_windows", False) and config.extra_windows:
+        weekly_hours_needed = _window_weekly_person_hours(config)
+        if weekly_hours_needed <= 0:
+            # Windows on but zero person-hours — do not invent 24×7 floor
+            weekly_hours_needed = 0.0
+            fte_basis = "none"
+        else:
+            fte_basis = "windows"
+    else:
+        # No 24/7, min_ps, or window demand — FTE not meaningful
+        weekly_hours_needed = 0.0
+        fte_basis = "none"
     annual_hours_needed = weekly_hours_needed * 52
-    fte_required = annual_hours_needed / max(config.annual_hours_target, 1)
+    if weekly_hours_needed > 0:
+        fte_required = annual_hours_needed / max(float(config.annual_hours_target or 1), 1.0)
+    else:
+        fte_required = 0.0
 
     coverage_pct = 100.0
-    if gap_counter:
-        total_required = config.simulation_days * slots_per_day * config.min_per_shift
+    if gap_counter and int(config.min_per_shift or 0) > 0:
+        total_required = config.simulation_days * slots_per_day * int(config.min_per_shift)
         total_met = total_required - sum(gap_counter.values())
         coverage_pct = round(100 * total_met / max(total_required, 1), 1)
+    elif gap_counter:
+        # min_ps off — report 0% if any structural gap events recorded
+        coverage_pct = 0.0
 
     if getattr(config, "phase_limit", 3) == 2:
+        # Phase 2 stops before 247/rest/FLSA — hard_ok only reflects min_ps gaps here
+        gap_sum = int(sum(gap_counter.values())) if gap_counter else 0
         metrics = {
             "avg_annual_hours": round(avg_hours, 1),
             "annual_band_outside": annual_band_outside,
@@ -1471,16 +2292,19 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             "annual_unfair": annual_unfair,
             "annual_hours_spread": annual_hours_spread,
             "annual_hours_variance": config.annual_hours_variance,
-            "hard_constraints_ok": True,
+            "hard_constraints_ok": gap_sum == 0 or int(config.min_per_shift or 0) <= 0,
             "shifts_per_day": len(shift_templates),
             "min_officers_required": config.num_officers,
             "compute_backend": "python",
-            "gap_events": sum(gap_counter.values()),
+            "gap_events": gap_sum,
             "total_gap_hours": total_gap_hours,
             "night_risk_gaps": night_risk_gaps,
             "coverage_percent": 100.0 if not total_gap_hours else 0.0,
-            "min_shift_coverage": min_coverage,
+            "min_shift_coverage": min_coverage if min_coverage != 999 else 0,
             "max_shift_coverage": max_coverage,
+            "phase_limit": 2,
+            "coverage_247_ok": None,  # not evaluated in phase 2
+            "rest_failures": None,
         }
         return SimulatorResult(
             success=True,
@@ -1488,9 +2312,9 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             compute_backend="python",
             shift_templates=shift_templates,
             officer_slots=slots,
-            coverage_by_day=[],
+            coverage_by_day=coverage_by_day,
             metrics=metrics,
-            suggestions={},
+            suggestions=[],
         )
 
     # --- PHASE 3: Labor Compliance (FLSA & Rest Gaps) ---
@@ -1541,13 +2365,14 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             for work_date, st, en in day_assignments:
                 if work_date != first_day:
                     continue
-                # Overnight or late starts that cover early morning of first_day+1
-                # also imply prior cycle coverage into first_day 00:00–start.
+                # Only *overnight* shifts (end clock ≤ start) spill past midnight into
+                # the next calendar morning. Early day starts (e.g. 05:00–13:00) do not.
                 try:
-                    sh = int(st.split(":")[0])
-                except ValueError:
-                    sh = 0
-                if sh >= 18 or sh < 6:
+                    sm = _hhmm_to_min(st)
+                    em = _hhmm_to_min(en)
+                except Exception:
+                    continue
+                if em <= sm:
                     seed_prior.append((first_day - timedelta(days=1), st, en))
 
         for day_offset in range(config.simulation_days):
@@ -1585,6 +2410,10 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
     if gap_counter and config.min_per_shift > 0:
         hard_ok = False
 
+    # Annual hard (also after off-day OT recompute above)
+    if config.annual_hours_hard and (annual_mean_outside or annual_unfair):
+        hard_ok = False
+
     # --- min_rest_hours hard gate ---
     # Check chronological day_assignments per slot to enforce a minimum rest
     # gap between the end of one shift and the start of the next work day.
@@ -1616,11 +2445,13 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
         "min_shift_coverage": min_coverage if min_coverage != 999 else 0,
         "max_shift_coverage": max_coverage,
         "fte_required": round(fte_required, 2),
+        "fte_basis": fte_basis,
         "avg_annual_hours": round(avg_hours, 1),
         # Coefficient of range (max−min)/avg — see hours_range_ratio comment above
         "hours_variance_ratio": round(hours_range_ratio, 3),  # legacy key kept for UI compat
         "hours_range_ratio": round(hours_range_ratio, 3),
-        "gap_events": len(gap_counter),
+        # Magnitude of understaffed band seats (not distinct day keys)
+        "gap_events": int(sum(gap_counter.values())) if gap_counter else 0,
         "night_risk_gaps": night_risk_gaps,
         "total_gap_hours": round(total_gap_hours, 1),
         "shifts_per_day": slots_per_day,
@@ -1777,6 +2608,27 @@ def _enrich_rust_sim_metrics(
     enriched.setdefault("avg_annual_hours", round(avg_hours, 1))
     enriched.setdefault("hours_range_ratio", round(hours_range_ratio, 3))
     enriched.setdefault("hours_variance_ratio", round(hours_range_ratio, 3))  # legacy compat
+    # FTE basis honesty (match Python path — never invent 24×7 when unconstrained)
+    if "fte_basis" not in enriched or not enriched.get("fte_basis"):
+        if int(config.coverage_247 or 0) > 0:
+            weekly = 24.0 * 7 * int(config.coverage_247)
+            enriched["fte_basis"] = "24/7"
+        elif int(config.min_per_shift or 0) > 0 and (config.shift_starts or []):
+            n_starts = len(config.shift_starts or [])
+            weekly = n_starts * int(config.min_per_shift) * float(config.shift_length_hours or 8) * 7
+            enriched["fte_basis"] = "min_per_shift"
+        elif getattr(config, "use_extra_windows", False) and config.extra_windows:
+            weekly = _window_weekly_person_hours(config)
+            enriched["fte_basis"] = "windows" if weekly > 0 else "none"
+            if weekly <= 0:
+                weekly = 0.0
+        else:
+            weekly = 0.0
+            enriched["fte_basis"] = "none"
+        if weekly > 0:
+            enriched["fte_required"] = round(weekly * 52 / max(float(config.annual_hours_target or 1), 1.0), 2)
+        else:
+            enriched["fte_required"] = 0.0
     # Align with Python path: band min gaps are hard when min_per_shift enforced
     if "hard_constraints_ok" not in enriched:
         # BUG-9 guard: Rust path cannot enforce 24/7 checks.
@@ -1796,12 +2648,21 @@ def _build_suggestions(
 
     if metrics["fte_required"] > config.num_officers:
         need = math.ceil(metrics["fte_required"] - config.num_officers)
+        basis = str(metrics.get("fte_basis") or "")
+        if basis == "24/7" or int(config.coverage_247 or 0) > 0:
+            fte_title = "Understaffed for 24/7 coverage"
+        elif basis == "windows":
+            fte_title = "Understaffed for staffing windows"
+        else:
+            fte_title = "Understaffed vs estimated FTE"
+        basis_note = f" (basis: {basis})" if basis else ""
         suggestions.append(
             SimulatorSuggestion(
                 severity="critical",
-                title="Understaffed for 24/7 coverage",
+                title=fte_title,
                 message=(
-                    f"Estimated {metrics['fte_required']:.1f} FTE required; you have {config.num_officers} officers."
+                    f"Estimated {metrics['fte_required']:.1f} FTE required{basis_note}; "
+                    f"you have {config.num_officers} officers."
                 ),
                 recommendation=f"Add at least {need} officer(s) or extend shift overlap.",
             )
@@ -1820,13 +2681,38 @@ def _build_suggestions(
             )
         )
 
-    if config.apply_department_rules and metrics["night_risk_gaps"] > 0:
+    if metrics.get("night_risk_gaps", 0) and int(getattr(config, "night_minimum", 0) or 0) > 0:
+        nmin = int(config.night_minimum)
         suggestions.append(
             SimulatorSuggestion(
                 severity="warning",
                 title="Friday/Saturday night minimum at risk",
-                message=f"{metrics['night_risk_gaps']} night shift(s) below department minimum.",
-                recommendation=f"Assign {NIGHT_MINIMUM_OFFICERS}+ officers to each night shift on Fri/Sat.",
+                message=f"{metrics['night_risk_gaps']} night shift(s) below night minimum ({nmin}).",
+                recommendation=f"Assign {nmin}+ officers to each night shift on Fri/Sat.",
+            )
+        )
+
+    rest_f = int(metrics.get("rest_failures") or 0)
+    min_rest = float(getattr(config, "min_rest_hours", 0) or 0)
+    if rest_f > 0 and min_rest > 0:
+        suggestions.append(
+            SimulatorSuggestion(
+                severity="critical",
+                title="Minimum rest between shifts not met",
+                message=f"{rest_f} consecutive work-day pair(s) leave less than {min_rest:g}h rest.",
+                recommendation="Widen start pack, lower min rest, or reduce consecutive ON days.",
+            )
+        )
+
+    consec_f = int(metrics.get("consecutive_work_failures") or 0)
+    max_c = int(getattr(config, "max_consecutive_work_days", 0) or 0)
+    if consec_f > 0 and max_c > 0:
+        suggestions.append(
+            SimulatorSuggestion(
+                severity="critical",
+                title="Max consecutive work days exceeded",
+                message=f"{consec_f} officer slot(s) exceed {max_c} consecutive ON days.",
+                recommendation="Use a lighter rotation block or raise the consecutive-day limit.",
             )
         )
 
@@ -1876,7 +2762,19 @@ def _build_suggestions(
             )
         )
 
-    if not gap_counter and metrics["coverage_percent"] >= 99:
+    # Only praise band coverage when hard floors also clear (no 247/window/rest lies)
+    hard_ok = bool(metrics.get("hard_constraints_ok", True))
+    cov247_ok = bool(metrics.get("coverage_247_ok", True))
+    win_fail = int(metrics.get("extra_window_failures") or 0)
+    night_soft = int(metrics.get("night_risk_gaps") or 0)
+    if (
+        hard_ok
+        and cov247_ok
+        and win_fail == 0
+        and night_soft == 0
+        and not gap_counter
+        and float(metrics.get("coverage_percent") or 0) >= 99
+    ):
         suggestions.append(
             SimulatorSuggestion(
                 severity="info",

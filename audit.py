@@ -228,7 +228,11 @@ def run_audit() -> List[AuditFinding]:
 def print_report(findings: List[AuditFinding]) -> int:
     passed = sum(1 for f in findings if f.passed)
     total = len(findings)
-    print(f"Audit: {passed}/{total} passed\n")
+    print(
+        f"Audit: {passed}/{total} passed\n"
+        "NOTE: HISTORICAL ONLY (AUD-001..010 fixed regressions) — "
+        "not product health. Green audit ≠ Chronos/simulator OK.\n"
+    )
     for f in findings:
         status = "PASS" if f.passed else "FAIL"
         print(f"  [{status}] {f.check_id}: {f.detail}")

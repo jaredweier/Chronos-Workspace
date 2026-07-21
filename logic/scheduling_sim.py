@@ -251,13 +251,13 @@ def what_if_staffing_delta(base_kwargs: Dict, **kwargs) -> Dict:
 def compare_shift_length_scenarios(
     *,
     lengths: Optional[List[float]] = None,
-    officer_count: int = 8,
-    annual_hours_target: float = 2008.0,
-    annual_hours_variance: float = 20.0,
+    officer_count: int = 0,
+    annual_hours_target: Optional[float] = None,
+    annual_hours_variance: float = 40.0,
     rotation_variations: Optional[List[str]] = None,
-    coverage_247: int = 1,
+    coverage_247: int = 0,
     extra_windows: Optional[List[Dict]] = None,
-    night_minimum: Optional[int] = 2,
+    night_minimum: Optional[int] = None,
     simulation_days: int = 28,
     require_hard_ok: bool = True,
     progress_callback=None,
@@ -272,46 +272,33 @@ def compare_shift_length_scenarios(
     allow_offday_coverage: bool = False,
     **_compat,
 ) -> Dict:
-    """Compare locked shift lengths (default 8/10/12h) under same coverage constraints.
+    """Compare locked shift lengths (default 8/10/12h) under caller coverage constraints.
 
-    Differentiator vs commercial auto-fill: wellness + coverage trade-off table.
+    No baked Fri/Sat or multi-block example — pass windows/variations from the form.
     Lengths run in parallel by default (shared cancel_check) to cut wall time.
 
     depth:
-      - "quick": 21-day sim, top LE packs + full multi-block vars (quality-first speed)
+      - "quick": 21-day sim, top LE packs + caller multi-block vars
       - "deep": 28-day + full start pack set (default exhaustive)
     """
     import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    if officer_count < 1:
+        return {"success": False, "message": "Officer count required for length compare", "comparisons": []}
+    if annual_hours_target is None or float(annual_hours_target) <= 0:
+        return {"success": False, "message": "Annual hours target required for length compare", "comparisons": []}
+
     lengths = list(lengths or [8.0, 10.0, 12.0])
-    rotation_variations = list(rotation_variations or ["6-2,5-3", "6-3,5-2"])
+    # Empty = squad preset path; never inject example multi-block strings
+    rotation_variations = list(rotation_variations or [])
     quick = str(depth or "deep").strip().lower() in ("quick", "fast", "cheap")
-    # Quick no longer strips quality: still multi-block + evening packs; shorter window only
     if quick:
         simulation_days = min(int(simulation_days or 28), 21)
     else:
         simulation_days = max(int(simulation_days or 28), 28)
-    if extra_windows is None:
-        # Fri+Sat 19:00–03:00 min 2 — same keys as Chronos simulator UI
-        extra_windows = [
-            {
-                "min_officers": int(night_minimum or 2),
-                "start_time": "19:00",
-                "end_time": "03:00",
-                "weekday": 4,
-                "label": "Friday Night",
-                "enabled": True,
-            },
-            {
-                "min_officers": int(night_minimum or 2),
-                "start_time": "19:00",
-                "end_time": "03:00",
-                "weekday": 5,
-                "label": "Saturday Night",
-                "enabled": True,
-            },
-        ]
+    # None/empty = no extra windows (caller must pass windows they want)
+    extra_windows = list(extra_windows or [])
 
     n_len = len(lengths)
     t0 = _time.perf_counter()
@@ -373,18 +360,18 @@ def compare_shift_length_scenarios(
             free_lengths=False,
             free_officer_counts=False,
             free_starts=False,
-            free_variations=True,
+            free_variations=bool(vars_use),
             min_rest_hours=min_rest_hours,
             max_consecutive_work_days=max_consecutive_work_days,
             nearby_start_hops=nearby_start_hops,
             allow_offday_coverage=allow_offday_coverage,
-            rotation_style="rotating",
+            rotation_style="rotating" if vars_use else "",
             rotation_variations=vars_use,
             annual_hours_target=float(annual_hours_target),
             annual_hours_variance=float(annual_hours_variance),
             annual_hours_hard=True,
             coverage_247=int(coverage_247),
-            use_extra_windows=True,
+            use_extra_windows=bool(extra_windows),
             extra_windows=extra_windows,
             night_minimum=night_minimum,
             simulation_days=int(simulation_days),

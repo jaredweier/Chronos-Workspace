@@ -61,13 +61,15 @@ Generated: {ts}
 ## Paste
 `@logs/agent_kit/latest.md` + `@logs/agent_pack/latest.md` + `@docs/AGENT_STABLE.md`
 
-## Rules (auto-abide)
-- Caveman bullets. No OSS/graphify/archive skills unless user asks.
-- `route-task` once → obey cost_tier. Max 1 skill body/task.
-- No explore/plan subagents. No subagents for gates.
-- Chain: usage-brief → outline/symbol → edit → `verify --tier fast`
-- Ship: `verify --tier check` + honest_gate true
-- ONLY alter the Antigravity Chronos Command folder, NEVER MyProject.
+## Rules (auto-abide) — FIRST
+- **Caveman:** short bullets. No preamble/recap/let-me. Prose only if user asks explain/docs.
+- **Token min:** fewest tools that finish fully+well. Parallel OK when it wins.
+- **Cost split:** easy → cheap/free; hard product/logic → primary. Prefer lower total usage.
+- Chain: `route-task` once → skill if helpful → edit/delegate → `verify --tier fast|core|check`
+- Tools/skills/subagents OK if cheaper/better. Gates/graphify/vision OK if cheaper than primary.
+- Archived skills: use then put back. Ship: `verify --tier check` + honest_gate true.
+
+- ONLY this Chronos Workspace — NEVER MyProject.
 
 ## Free cmds
 | Need | Cmd |

@@ -1,6 +1,14 @@
+"""Step 3 manual schedule builder (extracted from page.py)."""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict
+
 from nicegui import ui
 
+from gui.pages.simulator.form_logic import parse_shift_starts
 from gui.pages.simulator.helpers import _HINT
+from gui.shell import panel
 from logic.manual_schedule_build import (
     cycle_cell_start,
     empty_grid,
@@ -14,33 +22,32 @@ from logic.manual_schedule_build import (
 def render_manual_editor(
     state: dict,
     step_panels: dict,
-    go_step,
-    _baseline_kwargs,
-    _current_config,
-    set_plan,
-    set_summary,
-    session,
-    save_last_optimized_plan,
-    format_optimized_plan_view,
-    length_input,
-    officers_input,
-    starts_input,
-):
+    go_step: Callable[[int], None],
+    *,
+    baseline_kwargs: Callable[[], dict],
+    current_config: Callable[[], dict],
+    parse_starts: Callable[[], list],
+    set_plan: Callable[[str], None],
+    set_summary: Callable[[str], None],
+    session: Any,
+    save_last_optimized_plan: Callable,
+    format_optimized_plan_view: Callable,
+    length_input: Any,
+    officers_input: Any,
+) -> Dict[str, Any]:
+    """Build step 3 UI. Returns handlers (refresh for go_step)."""
     step3 = ui.element("div").classes("w-full").style("display:none")
     step_panels[3] = step3
+    out: Dict[str, Any] = {}
+
     with step3:
-        with (
-            ui.card()
-            .classes("w-full q-pa-md")
-            .style("background: var(--sim-panel); border: 1px solid var(--sim-border); box-shadow: none;")
-        ):
-            ui.label("Manual schedule builder").style("font-size: 1.1rem; font-weight: 600; color: #F8FAFC;")
+        with panel("Manual schedule builder"):
             ui.label(
                 "Build any schedule by editing officer × day cells. "
                 "Seed from rotation ON days, then override freely. "
                 "Evaluate hard constraints, then send to publish."
             ).style(_HINT)
-            with ui.row().classes("gap-2 flex-wrap items-end q-mt-sm"):
+            with ui.row().classes("gap-2 flex-wrap items-end"):
                 man_days = ui.input(label="Days In Grid", value="14").classes("w-32")
                 man_officer = ui.input(label="Officer # (1-based)", value="1").classes("w-32")
                 man_day = ui.input(label="Day # (0-based)", value="0").classes("w-32")
@@ -59,12 +66,11 @@ def render_manual_editor(
                     n = 0
                 return max(n, 1)
 
-            def _parse_starts():
-                text = starts_input.value or ""
-                return [s.strip() for s in text.replace(";", ",").split(",") if s.strip()]
-
             def _manual_starts_list() -> list:
-                st = _parse_starts()
+                try:
+                    st = list(parse_starts() or [])
+                except Exception:
+                    st = parse_shift_starts(getattr(length_input, "value", None))
                 return st if st else ["06:00", "14:00", "19:00", "22:00"]
 
             def _manual_set_eval(text: str):
@@ -84,7 +90,7 @@ def render_manual_editor(
                 ui.notify("Empty grid ready", type="info")
 
             def manual_seed_rotation():
-                base = _baseline_kwargs()
+                base = baseline_kwargs()
                 if base.get("error"):
                     ui.notify(base["error"], type="negative")
                     return
@@ -128,6 +134,7 @@ def render_manual_editor(
                         with ui.element("div").classes("sim-grid-row"):
                             ui.html(
                                 f'<span class="sim-grid-label">O{oi + 1}</span>',
+                                sanitize=False,
                             )
                             for di in range(show_days):
                                 val = grid[oi][di] or "OFF"
@@ -179,21 +186,25 @@ def render_manual_editor(
                 _manual_refresh_view()
                 ui.notify(f"O{oi + 1} day {di} → {raw}", type="info")
 
-            def manual_evaluate():
-                grid = state.get("manual_grid")
-                if not grid:
-                    ui.notify("No grid", type="warning")
-                    return
-                base = _baseline_kwargs()
-                if base.get("error"):
-                    ui.notify(base["error"], type="negative")
-                    return
+            def _resolve_length(base: dict):
                 sh_len = base.get("shift_length_hours")
                 if sh_len is None:
                     try:
                         sh_len = float((length_input.value or "").strip())
                     except Exception:
                         sh_len = None
+                return sh_len
+
+            def manual_evaluate():
+                grid = state.get("manual_grid")
+                if not grid:
+                    ui.notify("No grid", type="warning")
+                    return
+                base = baseline_kwargs()
+                if base.get("error"):
+                    ui.notify(base["error"], type="negative")
+                    return
+                sh_len = _resolve_length(base)
                 if sh_len is None:
                     ui.notify("Lock shift length on Requirements first", type="warning")
                     return
@@ -235,17 +246,14 @@ def render_manual_editor(
                 if not grid:
                     ui.notify("No grid", type="warning")
                     return
-                base = _baseline_kwargs()
+                base = baseline_kwargs()
                 if base.get("error"):
                     ui.notify(base["error"], type="negative")
                     return
-                sh_len = base.get("shift_length_hours")
+                sh_len = _resolve_length(base)
                 if sh_len is None:
-                    try:
-                        sh_len = float((length_input.value or "").strip())
-                    except Exception:
-                        ui.notify("Lock shift length first", type="warning")
-                        return
+                    ui.notify("Lock shift length first", type="warning")
+                    return
                 result = evaluate_manual_grid(
                     grid,
                     shift_length_hours=float(sh_len),
@@ -269,7 +277,7 @@ def render_manual_editor(
                     ui.notify(result.get("message") or "Failed", type="negative")
                     return
                 state["result"] = result
-                state["config"] = result.get("simulation_config") or _current_config()
+                state["config"] = result.get("simulation_config") or current_config()
                 uid = (session.current_user() or {}).get("id")
                 save_last_optimized_plan(result, state["config"], user_id=uid)
                 view = format_optimized_plan_view(result, state["config"])
@@ -300,4 +308,6 @@ def render_manual_editor(
                     "no-caps outline"
                 )
 
-    return _manual_refresh_view
+    out["refresh"] = _manual_refresh_view
+    out["step"] = step3
+    return out

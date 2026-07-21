@@ -1,27 +1,29 @@
 # Dodgeville PD — Agent Rules
-**Session auto** now. Auto-context off. Skills on demand. UI: `gui/` Chronos.
-**Stable** `@docs/AGENT_STABLE.md` · **Pack** `@logs/agent_pack/latest.md` · **Contract** `@logs/SESSION_CONTRACT.md`
-**Trust** `@docs/AGENT_TRUST_AND_MISTAKES.md` · `@logs/NEXT_SESSION_BRIEF.md`
-## Trust
-Never claim fixed/done without user scenario proof (or residual). Unit≠Chronos. Prove first.
-## Caveman
-Short bullets. No preamble. Prose only if explain/docs.
-## Route once
-`python dev.py route-task "<task>"` → cost_tier. Max one skill body.
-## Minimize
-usage-brief → outline/symbol → edit touch_together → `verify --tier fast`
-Ship: `verify --tier check` + `logs/last_verify.json` → honest_gate true
-## Hard bans
-No explore/plan subagents; no subagents for gates. Max 1 skill/task.
-Never open `docs/archived_skills/` unless user names that skill.
-Optional only if asked: graphify · vision · OSS research.
 
-## Simulator & Optimizer Logic
-- **User Numbers First**: Strictly follow the constraint of shift length entered by a user if chosen to have on. If off, all shift lengths in range of 8 and 12.5 hours in .5 hour increments should be considered to meet whatever constraints the user has selected. Do not invent other defaults when overriding is requested.
-- **Annual Math**: Compute annual hours using `projected_annual_hours(pattern, length)` based on the pattern cycle, not noisy 28-day extrapolations.
-- **Deep Search**: The optimizer must evaluate multi-block variations, stagger, and rotation style. Never collapse daily bands during shift rebalancing.
+**Session auto** at open (no paste). **Auto-context OFF.** Skills on demand (when helpful).
 
-## UI & Product Integrity
-- **Quasar Primary**: `primary` color must be command blue (`#3B7DD8`), not silver (`#C5CED9`).
-- **Layout Stability**: Use fixed grids and disabled states to prevent row jumping in the simulator.
-- **Prove UI**: Do not claim UI is fixed without confirming the button colors, dropdown behaviors (e.g., DOW selection), and centering.
+## FIRST
+1. **Caveman:** short bullets. No preamble/recap/"let me". Prose only if user asks explain/docs.
+2. **Token min / Minimize:** fewest tools that still finish **fully and well**; 1 thing at a time unless parallel clearly wins.
+3. **Bootstrap:** `python scripts/session_auto_bootstrap.py` → read contract.
+4. **Cost split:** easy → cheap/free agents/models; hard product/logic → **this** agent. Prefer any path with **lower total usage**.
+
+## Refs
+`@logs/SESSION_CONTRACT.md` · `@logs/agent_pack/latest.md` · `@docs/AGENT_STABLE.md`
+`@logs/NEXT_SESSION_BRIEF.md` · `@docs/AGENT_TRUST_AND_MISTAKES.md`
+Always-on: `.grok/rules/auto-minimize.md` + `verify-policy.md` · domain → `on-demand/`
+
+## Chain
+`route-task` once · skill if needed · outline/symbol · edit (or delegate easy) · light=`fast` · logic/gui=`core` · ship=`check`+`honest_gate:true`
+Never done on fast alone. Audit 10/10 ≠ health. Unit ≠ Chronos. `token-improve` → `token-audit --strict`.
+
+## Tools / skills / subagents
+**Allowed** when they improve quality/speed **or cost less than primary**.
+Verify/gates, explore/plan, graphify, vision — OK **if cheaper / better ROI** than primary doing it.
+Policy: `.grok/rules/on-demand/subagents.md`
+
+## Archived skills
+`docs/archived_skills/` — keep archived. Need one → use → **put right back** in archive when done.
+
+## Bans
+Do not leave archive skills live after use. Kill processes you start.

@@ -16,8 +16,8 @@ How external OSS tools complement Cursor/Grok agents, skills, and `dev.py` for t
 | `python dev.py ui-observe` | Observation bundle for vision agents |
 | `python dev.py ui-diff` | Pillow visual regression vs baselines |
 | `python dev.py preflight` / `check` | Fast and full verification |
-| `.grok/rules/ui-modern.md` | Modern UI design-system rules |
-| `.grok/rules/scheduling-math.md` | Rotation / bump / pay-period math card |
+| `.grok/rules/on-demand/ui-modern.md` | Modern UI design-system rules |
+| `.grok/rules/on-demand/scheduling-math.md` | Rotation / bump / pay-period math card |
 | `.grok/skills/token-discipline/` | Token minimization skill |
 
 ## OpenCode ([anomalyco/opencode](https://github.com/anomalyco/opencode))

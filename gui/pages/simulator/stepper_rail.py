@@ -2,16 +2,19 @@ from nicegui import ui
 
 from gui.pages.simulator.helpers import _STEP_OFF, _STEP_ON
 
+# Workflow steps (outer rail). Inner Phase 1–3 stepper lives under Requirements only.
+STEP_META = (
+    (1, "Requirements", "tune"),
+    (2, "Find best", "travel_explore"),
+    (3, "Manual build", "grid_on"),
+    (4, "Publish", "publish"),
+)
+
 
 def render_stepper_rail(state: dict, step_labels: dict, go_step_cb) -> None:
-    _STEP_META = (
-        (1, "Requirements", "tune"),
-        (2, "Find best", "travel_explore"),
-        (3, "Manual build", "grid_on"),
-        (4, "Publish", "publish"),
-    )
+    """Top workflow rail. Publish locked until a result exists."""
     with ui.element("div").classes("sim-step-rail").props('role="navigation" aria-label="Simulator steps"'):
-        for idx, (i, title, icon) in enumerate(_STEP_META):
+        for idx, (i, title, icon) in enumerate(STEP_META):
             if idx:
                 ui.element("div").classes("sim-step-connector")
             lab = ui.element("div").classes(_STEP_ON if i == 1 else _STEP_OFF)

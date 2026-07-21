@@ -59,6 +59,7 @@ def _find_graphify() -> Optional[List[str]]:
         home / ".local" / "bin" / "graphify.exe",
         home / ".local" / "bin" / "graphify",
         Path(os.environ.get("USERPROFILE", "")) / ".local" / "bin" / "graphify.exe",
+        Path(os.environ.get("APPDATA", "")) / "Python" / "Python314" / "Scripts" / "graphify.exe",
     ):
         if candidate.is_file():
             return [str(candidate)]

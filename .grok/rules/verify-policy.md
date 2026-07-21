@@ -6,13 +6,17 @@
 
 | Tier | Command | When | Honest for ship? |
 |------|---------|------|------------------|
-| fast | `python dev.py verify --tier fast` | After every edit | No |
+| **core** | `python dev.py verify --tier core` | After logic/validators/gui/database edits | No (but runs product unittests) |
+| fast | `python dev.py verify --tier fast` | After light edits (includes **core-test**) | No |
 | preflight | `python dev.py verify --tier preflight` | Pre-commit, handoff (+ **graphify-gate**) | No |
-| **check** | `python dev.py verify --tier check` | Before claiming done (+ graphify) | **Yes** |
+| **check** | `python dev.py verify --tier check` | Before claiming done (product discover) | **Yes** |
 | full | `python dev.py verify --tier full` | Release candidate | Yes |
 | release | `python dev.py verify --tier release` | Full regression | Yes |
+| agent-meta | `python dev.py verify --tier agent-meta` | After agent/token/route/policy tooling edits | No |
 
-Aliases `cheap-check` and `preflight` delegate to the same tiers — they cannot diverge.
+Aliases `cheap-check` → fast. Tiers cannot diverge from `scripts/verify.py`.
+`core-test` modules: logic, validators, regressions, simulator_constraints, coverage_optimizer, payroll.
+Ship `test` step **excludes** `tests/agent_meta/` (token/route/verify structure).
 
 ## Never (test theater)
 
@@ -27,13 +31,13 @@ Aliases `cheap-check` and `preflight` delegate to the same tiers — they cannot
 1. **Reproduce the real failure** (manual steps or failing gate) before writing a fix.
 2. **Run tier ≥ change scope:**
    - copy/theme only → fast
-   - logic/validators → preflight minimum; check before done
-   - UI pages/login → check (includes readiness + full unittest)
+   - logic/validators/gui/database → **core** minimum; **check** before done
+   - UI pages/login → check (full unittest + readiness)
 3. **Read `logs/last_verify.json`** after any gate — `honest_gate: false` means not ship-ready.
 4. **Fix root cause** — no workarounds, env hacks, or probe-only patches.
 
 ## Agent churn prevention
 
 - Do not re-read whole repo after a passing fast tier.
-- Do not spawn subagents for `verify --tier fast|preflight|check`.
+- Verify/gates: primary **or** cheaper subagent/terminal — pick **lower total cost**; no expensive subagent tax by default.
 - One verification run per edit batch; escalate tier only when fast fails or scope demands check.

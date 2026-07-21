@@ -3,7 +3,9 @@
 import unittest
 
 from scripts.verify import (
+    CORE_TEST_MODULES,
     STEP_CHECK,
+    STEP_CORE,
     STEP_FAST,
     STEP_FULL,
     STEP_PREFLIGHT,
@@ -13,6 +15,9 @@ from scripts.verify import (
 
 
 class VerifyUnifiedTests(unittest.TestCase):
+    def test_core_subset_of_fast(self):
+        self.assertTrue(is_subset("core", "fast"))
+
     def test_fast_subset_of_preflight(self):
         self.assertTrue(is_subset("fast", "preflight"))
 
@@ -28,6 +33,19 @@ class VerifyUnifiedTests(unittest.TestCase):
     def test_no_duplicate_steps_in_check(self):
         steps = tier_steps("check")
         self.assertEqual(len(steps), len(set(steps)), f"duplicate steps: {steps}")
+
+    def test_core_test_in_fast_and_preflight(self):
+        self.assertIn("core-test", STEP_CORE)
+        self.assertIn("core-test", STEP_FAST)
+        self.assertIn("core-test", STEP_PREFLIGHT)
+
+    def test_core_modules_are_product_not_meta(self):
+        self.assertGreaterEqual(len(CORE_TEST_MODULES), 4)
+        joined = " ".join(CORE_TEST_MODULES)
+        self.assertIn("test_logic", joined)
+        self.assertIn("test_regressions", joined)
+        self.assertNotIn("test_token", joined)
+        self.assertNotIn("test_verify_unified", joined)
 
     def test_readiness_in_fast_and_preflight(self):
         self.assertIn("readiness", STEP_FAST)
@@ -52,9 +70,30 @@ class VerifyUnifiedTests(unittest.TestCase):
         self.assertIn("graphify", STEP_PREFLIGHT)
         self.assertIn("graphify", STEP_CHECK)
         self.assertNotIn("graphify", STEP_FAST)
+        self.assertNotIn("graphify", STEP_CORE)
 
     def test_tier_alias_cheap_check(self):
         self.assertEqual(tier_steps("cheap-check"), tier_steps("fast"))
+
+    def test_agent_meta_tier_isolated(self):
+        steps = tier_steps("agent-meta")
+        self.assertIn("agent-meta-test", steps)
+        self.assertNotIn("agent-meta-test", STEP_CHECK)
+        self.assertNotIn("agent-meta-test", STEP_FAST)
+
+    def test_product_suite_excludes_agent_meta(self):
+        import os
+        import unittest
+
+        from scripts.verify import ROOT, _suite_without_agent_meta
+
+        loader = unittest.TestLoader()
+        raw = loader.discover("tests", pattern="test_*.py", top_level_dir=ROOT)
+        full = raw.countTestCases()
+        product = _suite_without_agent_meta(raw).countTestCases()
+        self.assertLess(product, full, f"full={full} product={product}")
+        self.assertGreaterEqual(full - product, 10)
+        self.assertTrue(os.path.isdir(os.path.join(ROOT, "tests", "agent_meta")))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 """Auto-run at every new agent session (Grok/Cursor hook or launcher).
 
 Refreshes lean kit/pack + SESSION_CONTRACT.md. No graphify tax.
-Safe to call from any cwd; only acts when workspace is this MyProject tree
+Safe to call from any cwd; only acts when workspace is Chronos Workspace / MyProject
 (or SCHEDULER_FORCE_BOOTSTRAP=1).
 """
 
@@ -19,63 +19,48 @@ CONTRACT = ROOT / "logs" / "SESSION_CONTRACT.md"
 KIT = ROOT / "logs" / "agent_kit" / "latest.md"
 PACK = ROOT / "logs" / "agent_pack" / "latest.md"
 
-CONTRACT_BODY = """# Session contract (auto - do not ask user to paste)
+CONTRACT_BODY = """# Session contract (auto)
 
-You are already bound by `AGENTS.md` + `.grok/rules/*`. Follow now.
+Bound by `AGENTS.md`. Always-on rules: `.grok/rules/auto-minimize.md` + `verify-policy.md`.
+Domain cards: `.grok/rules/on-demand/` (load only when needed).
 
-## Trust (human rebuke - binding)
-- Full rules + mistakes: **`docs/AGENT_TRUST_AND_MISTAKES.md`** (read when doing product/sim/optimizer/UI).
-- **Never claim fixed/done** without proving the **user exact scenario** (or honest residual).
-- Unit green != Chronos works. **No half-jobs. No appeasement hacks.**
-- User numbers first (e.g. **8h** shifts: 6-2,5-3 annual ~ **2008h**). Do not invent 11h/12h.
-- Prove first, claim second. Ship language only: `verify --tier check` + `honest_gate: true`.
+## 0) Caveman (ABSOLUTE)
+Short bullets only. No preamble/recap/"let me". Prose only if user asks explain/docs.
+Proof footer after non-trivial work. One question max when blocked.
 
-## Reply
-Caveman: short bullets. No preamble/recap. Prose only if user asks explain/docs.
+## 1) Token minimize (ABSOLUTE)
+Fewest tools that still finish **fully and well**. Prefer 1 thing at a time; parallel OK when it clearly wins.
+`route-task` once → skill if helpful → edit (or delegate easy) → gate:
+- light → `verify --tier fast`
+- logic/validators/gui/database → `verify --tier core` then ship `check`
+Ship only: `verify --tier check` + `logs/last_verify.json` → `honest_gate: true`
+Never claim done on fast. Audit 10/10 = historical only (not product health).
 
-## Work
-1. `python dev.py route-task "<task>"` **once** - obey cost_tier
-2. Load **at most one** skill body if route prints it
-3. `usage-brief` then `outline`/`symbol` then edit `touch_together` only
-4. After edits: `python dev.py verify --tier fast`
-5. Ship claim: `verify --tier check` + `logs/last_verify.json` -> `honest_gate: true`
+## 1b) Cost split + leverage
+Easy/mechanical → cheap/free agents or models. Hard product/logic/ship → **primary agent**.
+Tools / skills / subagents **allowed** when they improve quality/speed **or cost less than primary**.
+Verify/gates, graphify, vision OK **if cheaper / better ROI** than primary. Full: `.grok/rules/on-demand/subagents.md`
 
-## Hard bans
-- No explore/plan subagents; no subagents for gates/verify
-- Never open `docs/archived_skills/` unless user names that skill
-- No graphify / vision / OSS research unless user asks
-- No whole-repo reads; stop when confident
-- No fixed/implemented without scenario proof or explicit residual
+## 2) Trust
+`docs/AGENT_TRUST_AND_MISTAKES.md` — prove user scenario before "fixed". Unit ≠ Chronos.
+User numbers first (8h/2008h/6-2,5-3 were debug examples, not fixed product defaults).
 
-## Primary product
-Chronos UI = `gui/`. Domain = `logic/*` + `validators`. No SQL in `gui/`.
-**Brand:** config `Chronos Command` | display **CHRONOS COMMAND** (CSS uppercase only) | Weierworks Technologies, LLC | logo: Branding & Media.
-Do **not** set `APP_NAME` to all-caps in Python — auth/logic stay Title Case string; paint via `gui/theme.py` brand classes.
+## 3) Hard bans
+Archived skills stay archived except while in use (then put back) · no thrash graphify/vision · kill processes you start · one Chronos on :8080
 
-**Simulator / staffing (still binding):**
-- UI: `gui/pages/simulator.py` | engine `simulator.py` | `staffing_optimizer` for multi-block
-- No invent constraints; OFF days OFF unless opt-in; user numbers **8h / ~2008h / 6-2,5-3**
-- Sensitivity **cheap by default** (`logic/sim_product_pack.py`); deep only if asked
+## 4) Product
+`gui/` Chronos · `logic/*` + validators · no SQL in gui · brand via theme (not all-caps APP_NAME)
+Simulator: `gui/pages/simulator/` · UAT: this tree always-on · proof: `scripts/_sim_path_proof.py`
 
-**Also hot (2026-07-17 — always-on remote UAT · live SMS deferred):**
-- **Always-on remote UAT:** Task `ChronosAlwaysOnUAT` · `Install Always-On UAT.bat` · supervisor `scripts/always_on_uat.ps1`
-- Public URL: `logs/remote_uat_url.txt` · card `logs/remote_uat_live.txt` · lab DB `lab_data/virtual_uat.db`
-- UAT full product: `SCHEDULER_UAT_LAB=1` · login one-click admin · `/uat` hub · `logic/uat_lab.py`
-- Code saves under gui/logic auto-restart Chronos (tunnel stays when healthy) · testers Ctrl+F5
-- **One Chronos only** on :8080 — do not start a second server over always-on
-- Brand: config `Chronos Command` · display CHRONOS COMMAND CSS only
-- Station/fatigue/ops depth landed · notify **file sink** (live carrier deferred)
-- E2E: `chronos-e2e --quick` against existing :8080 · Doc: `docs/VIRTUAL_UAT.md` · Cloud: `docs/deploy/CLOUD_VM.md`
-- Open residual: **live SMS/email** · LDAP AD IT · optional named CF tunnel for fixed URL
-- Last ship: `verify --tier check` + `honest_gate: true` — re-run after product edits
-
-## Session brief (auto-read)
-**Must obey** `logs/NEXT_SESSION_BRIEF.md` - last landings, open residuals, proof commands.
-Handoff head: `docs/HANDOFF.md` section NEXT SESSION. Start pack: `docs/NEXT_AGENT_PROMPT.md`.
+## 5) Landing
+**Only** `logs/NEXT_SESSION_BRIEF.md` for residuals. Trust file for mistakes.
 
 Generated: {ts}
-Kit: `logs/agent_kit/latest.md` | Pack: `logs/agent_pack/latest.md` | Trust: `docs/AGENT_TRUST_AND_MISTAKES.md`
 """
+
+
+# Known workspace folder names for this project
+_WORKSPACE_NAMES = ("myproject", "chronos workspace", "chronos_workspace")
 
 
 def _is_myproject_workspace() -> bool:
@@ -93,17 +78,22 @@ def _is_myproject_workspace() -> bool:
         p = str(Path(m).resolve()).lower().replace("/", "\\")
         if p == root_s or p.startswith(root_s + "\\"):
             return True
-        if "myproject" in p and "myproject" in root_s:
-            # same leaf name under users path
-            if Path(m).resolve().name.lower() == "myproject":
-                return True
+        leaf = Path(m).resolve().name.lower()
+        if leaf in _WORKSPACE_NAMES and any(w in root_s for w in _WORKSPACE_NAMES):
+            return True
+    # Always match if cwd is under ROOT
+    try:
+        Path(os.getcwd()).resolve().relative_to(ROOT)
+        return True
+    except ValueError:
+        pass
     return False
 
 
 def run_bootstrap(*, quiet: bool = True) -> int:
     if not _is_myproject_workspace():
         if not quiet:
-            print("session_auto_bootstrap: skip (not MyProject workspace)")
+            print("session_auto_bootstrap: skip (not Chronos/MyProject workspace)")
         return 0
 
     os.chdir(ROOT)
@@ -164,22 +154,22 @@ def cursor_session_start_json() -> dict:
     if PACK.is_file():
         pack_est = max(1, len(PACK.read_text(encoding="utf-8", errors="replace")) // 4)
     context = (
-        f"SESSION CONTRACT ACTIVE (auto).\n"
+        "SESSION CONTRACT ACTIVE (auto).\n"
+        "=== FIRST: CAVEMAN + TOKEN MIN (ABSOLUTE) ===\n"
+        "Caveman: short bullets only. No preamble/recap/let-me. Prose only if user asks explain/docs.\n"
+        "Minimize: fewest tools that finish fully+well. Parallel OK when it wins. Easy→cheap; hard→primary.\n"
+        "Chain: route-task once → skill if helpful → edit/delegate → verify --tier fast|core|check.\n"
+        "Tools/skills/subagents OK if cheaper or better. Gates/graphify/vision OK if cheaper than primary.\n"
+        "Archived skills: use then put back. Ship: check + honest_gate true. @.grok/rules/auto-minimize.md\n"
         f"Obey @AGENTS.md | @logs/SESSION_CONTRACT.md | @logs/agent_pack/latest.md (~{pack_est}t).\n"
-        f"TRUST/MISTAKES (binding): @docs/AGENT_TRUST_AND_MISTAKES.md\n"
-        f"LAST LANDINGS + RESIDUALS (binding): @logs/NEXT_SESSION_BRIEF.md | @docs/HANDOFF.md NEXT SESSION\n"
-        "Never claim fixed without proving user scenario. Unit green != UI works. No half-jobs.\n"
-        "Caveman. route-task once. Max 1 skill. No archive skills. No subagents for gates.\n"
-        "Sufficiency: stop when confident; no whole-repo reads.\n"
-        "No graphify/OSS/vision unless user asks. Ship only with check + honest_gate.\n"
-        "Brand: config Chronos Command | display CHRONOS COMMAND (CSS only) | Weierworks | logo via Branding & Media.\n"
-        "Never uppercase APP_NAME in Python; brand classes in gui/theme.py. Hard-refresh after CSS.\n"
-        "Simulator: last-saved constraints only; multi-block in optimizer; 8h/2008h first; sensitivity cheap default.\n"
-        "Landed: ops depth residuals (station board · fatigue rank · bulk station · LDAP IT export · e2e --quick) + brand + product complete; check-green.\n"
-        "Open residual: live SMS/email *delivery* only (user deferred) — needs real Twilio/SMTP. LDAP production_ready needs AD+IT.\n"
-        "Do not claim live carrier notify or LDAP production without dept proof.\n"
-        "Live e2e: one Chronos only · prefer chronos-e2e --quick. Restart Chronos after pulls. Ship: check + honest_gate.\n"
-        "Proof cmds: residual_proof_smoke · deeper_ui_click_paths · chronos_e2e --quick · tests.test_product_hosting_p0."
+        "TRUST: @docs/AGENT_TRUST_AND_MISTAKES.md — never claim fixed without user-scenario proof. Unit!=Chronos.\n"
+        f"LANDINGS/RESIDUALS: @logs/NEXT_SESSION_BRIEF.md | @docs/HANDOFF.md NEXT SESSION\n"
+        "Workspace: C:\\Users\\Windows\\Chronos Workspace only — NEVER MyProject.\n"
+        "Always-on :8080 = this tree (ChronosAlwaysOnUAT). One Chronos only.\n"
+        "Simulator package: gui/pages/simulator/ (page.py still holds Requirements form + optimizer actions).\n"
+        "User numbers first; 8h/2008h/6-2,5-3 are example numbers to fix sim logic — NOT fixed constraints.\n"
+        "Proof: scripts/_sim_path_proof.py · tests.test_simulator_constraints · verify --tier fast|check.\n"
+        "Open residual: Requirements form still in page.py; live SMS/email deferred; LDAP untested.\n"
     )
     return {
         "continue": True,
@@ -189,8 +179,8 @@ def cursor_session_start_json() -> dict:
 
 
 def main() -> int:
-    # Consume stdin (hook payload) if present
-    if not sys.stdin.isatty():
+    # Consume stdin (hook payload) if present and requested by environment
+    if not sys.stdin.isatty() and os.environ.get("GROK_HOOK_EVENT"):
         try:
             json.load(sys.stdin)
         except Exception:
@@ -200,8 +190,23 @@ def main() -> int:
 
     # Cursor / some hosts read additional_context from SessionStart stdout
     event = (os.environ.get("GROK_HOOK_EVENT") or "").lower()
-    if event in ("", "session_start", "sessionstart") or os.environ.get("CURSOR_TRACE_ID"):
+    is_cursor = bool(os.environ.get("CURSOR_TRACE_ID"))
+    if event in ("session_start", "sessionstart") or is_cursor:
         print(json.dumps(cursor_session_start_json()))
+    else:
+        sys.stdout.buffer.write(b"============================================================\n")
+        sys.stdout.buffer.write(b"SESSION BOOTSTRAP: ACTIVE CONTEXT\n")
+        sys.stdout.buffer.write(b"============================================================\n")
+        for fpath, name in [
+            (CONTRACT, "RULES & CONTRACT"),
+            (PACK, "DYNAMIC PACK"),
+            (ROOT / "docs" / "AGENT_TRUST_AND_MISTAKES.md", "TRUST & MISTAKES"),
+            (ROOT / "logs" / "NEXT_SESSION_BRIEF.md", "NEXT SESSION BRIEF"),
+        ]:
+            if fpath.is_file():
+                sys.stdout.buffer.write(f"\n--- {name} ---\n".encode("utf-8"))
+                sys.stdout.buffer.write(fpath.read_bytes())
+                sys.stdout.buffer.write(b"\n")
     return code
 
 

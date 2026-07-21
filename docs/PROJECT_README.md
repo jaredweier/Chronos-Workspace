@@ -3,7 +3,7 @@
 This document summarizes **what the app does today**, **recent changes**, **how to run and test it**, and **where development is headed**. It mirrors the agent handoff in [`HANDOFF.md`](HANDOFF.md) in a form meant for humans and new contributors.
 
 **Last updated:** 2026-07-13
-**Tests:** `python -m unittest discover -s tests -p "test_*.py"` — **385 OK** (2026-07-13; re-prove after edits). Ship: `python dev.py verify --tier check` + `honest_gate: true`.
+**Tests:** ship gate runs product suite (excludes `tests/agent_meta/`). Tooling: `python dev.py verify --tier agent-meta`. Ship: `python dev.py verify --tier check` + `honest_gate: true`.
 **Agent tokens:** `AGENTS.md` caveman + `docs/archived_skills/` (not discoverable). `python dev.py token-audit --strict`.
 
 ---

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TokenPolicyTests(unittest.TestCase):

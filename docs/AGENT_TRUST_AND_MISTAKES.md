@@ -22,7 +22,7 @@ The human has said agents are **untrustworthy and ineffective** when they:
 
 ## Mandatory working rules (simulator / optimizer and all product work)
 
-1. **User numbers first.** Lock to stated constraints (officers, hours, shift length, windows, rotation text). Do **not** assume department defaults (e.g. 11h) when the human said **8h**.
+1. **User numbers first.** Lock to **what the user states** at runtime. Do **not** assume any defaults — 8h/2008h/6-2,5-3 were example numbers to fix simulator logic, not hard product constraints. Do **not** assume department defaults (e.g. 11h) when the human hasn't specified.
 2. **Prove before “fixed”.** Run the exact scenario in code (generate + optimize hard). Green unittest alone is **not** product proof. Chronos click / human retest for UI.
 3. **Never say fixed if unproven.** Say incomplete / partial / residual shortfall with the real metric (e.g. `extra_window_failures=1` at 7 officers).
 4. **No appeasement hacks.** Do not hide layout bugs, soft-pass hard constraints, or switch to unrelated shift models just to make a green message.
@@ -33,6 +33,7 @@ The human has said agents are **untrustworthy and ineffective** when they:
 6. **Optimizer is deep search.** Must pass multi-block variations, stagger, windows, 24/7, annual band, free vs locked dimensions — not a thin rotation×N loop only.
 7. **UI claims:** layout must not jump; primary buttons must be readable (Quasar `primary` color matters); dropdowns must change value; login window/card centered. Human click is the bar.
 8. **Ship language** only after `verify --tier check` + `honest_gate: true`. Day-to-day: one focused test + honest residual list.
+9. **Process hygiene.** Any process you start for a task (dev server, test run, one-off script) must be terminated once it's no longer needed — never leave it running after its task is done. Before starting a new one, check for stray/duplicate processes from earlier work (`Get-CimInstance Win32_Process -Filter "Name='python.exe'"` in PowerShell) and clean up anything abandoned. 2026-07-17: found 20+ stray Python processes (duplicate `verify`/`unittest` runs hung for 3+ hours) plus 2 leftover unrelated backend processes, all silently starving CPU and making unrelated live-UI tests look broken. Also: don't chain multiple tool calls or background tasks at once without checking in — the human was explicit that this wastes tokens/usage.
 
 ---
 
@@ -44,12 +45,21 @@ The human has said agents are **untrustworthy and ineffective** when they:
 | Left “human retest” as residual | User said agent owns UI confirmation | Agent proves product path or states **broken** with residual only |
 | Token theater (40+ min restarts) | Many server kill/restart loops, no product value | One clean server; one real click path; stop if blocked |
 | Free-start packs at 03:00/11:00 etc. | User never asked for odd clock faces | **30-minute grid only**; LE-sane anchors in optimizer |
+
+## Mistakes from 2026-07-17 late evening (do not repeat)
+
+| Mistake | What went wrong | Correct behavior |
+|---------|-----------------|------------------|
+| Broke Caveman + Minimize all session | Long prose replies, chained tool/background calls without checking in, wasted tokens | Short bullets always; one action at a time; ask before parallel/background work |
+| Left stray processes running for hours | 20+ dev-server/test/verify processes hung 3+ hrs, starved CPU, broke live UI tests | Kill every process you start once its task is done (rule 9 above) |
+| Treated 3 point-fixes as the fix | Officer-count band, form-restore lock, WS buffer — real bugs, but simulator/UI has deeper, broader problems the user flagged as needing a **major overhaul**, not patches | Next agent: scope a real simulator/UI redesign pass, don't assume 3 patches = done |
 | Assumed NiceGUI permanent | User: any UI OK; current UI wordy/slop | Logic first; redesign later |
 
 ## Mistakes from 2026-07-14 simulator session (do not repeat)
 
 | Mistake | What went wrong | Correct behavior |
 |---------|-----------------|------------------|
+| Sliding windows for FLSA | Used a rolling window for §207(k) limit which falsely failed valid schedules with fluctuating pay period hours (e.g., 72, 80, 88). | FLSA uses a fixed non-overlapping anchor. Evaluate fixed blocks across possible anchor offsets, not rolling windows. |
 | Assumed 11h/12h | Human scenario is **8h**; 11/16×365×8 = **2007.5** ≈ 2008±20 | Use stated length; compute annual from **pattern cycle**, not noisy 28-day work-day extrapolation |
 | Annual from short sim | Phase stagger made officers look 1877–2190h | `projected_annual_hours(pattern, length)` when multi-block |
 | Optimizer ignored multi-block | `rotation_variations` / style not in sweep | Pass variations + style + stagger into every scenario |
@@ -65,7 +75,9 @@ The human has said agents are **untrustworthy and ineffective** when they:
 
 ---
 
-## Real-world reference scenario (user-stated)
+## Real-world reference scenario (context for simulator logic fixes — NOT a fixed constraint)
+
+> These numbers were provided by the user to debug and prove the simulator works. They are **NOT** hard product constraints. The simulator must explore all viable options based on what the user enters at runtime.
 
 - ~**7** officers (may need **8** for full hard weekend nights)
 - **2008** annual hours, **±20**

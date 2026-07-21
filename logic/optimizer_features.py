@@ -65,7 +65,7 @@ REAL_WORLD_8H_PRESET: Dict[str, Any] = {
 }
 
 WINDOW_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
-    "fri_sat_night": list(REAL_WORLD_8H_PRESET["extra_windows"]),
+    # No "real-world 8h" Fri/Sat seed — windows are user-built or generic templates only.
     "weekend_all_day": [
         {
             "min_officers": 2,
@@ -110,7 +110,6 @@ WINDOW_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
 
 def list_window_templates() -> List[Dict[str, str]]:
     return [
-        {"id": "fri_sat_night", "label": "Fri+Sat Night 19:00–03:00 Min 2"},
         {"id": "weekend_all_day", "label": "Sat+Sun Day Min 2"},
         {"id": "holiday_eve", "label": "Holiday Eve Peak Min 3"},
         {"id": "court_week_mornings", "label": "Court Week Mornings Min 2"},
@@ -410,32 +409,45 @@ def find_min_officers_hard(
     *,
     lo: int = 4,
     hi: int = 16,
-    shift_length_hours: float = 8.0,
-    annual_hours_target: float = 2008.0,
-    annual_hours_variance: float = 20.0,
+    shift_length_hours: Optional[float] = None,
+    annual_hours_target: Optional[float] = None,
+    annual_hours_variance: float = 40.0,
     rotation_variations: Optional[List[str]] = None,
     shift_starts: Optional[List[str]] = None,
     shift_starts_options: Optional[List[List[str]]] = None,
-    coverage_247: int = 1,
+    coverage_247: int = 0,
     extra_windows: Optional[List[Dict]] = None,
     night_minimum: Optional[int] = None,
     simulation_days: int = 28,
     progress_callback=None,
     cancel_check=None,
 ) -> Dict[str, Any]:
-    """Binary search smallest N that meets hard constraints (product path).
+    """Binary search smallest N that meets hard constraints from caller inputs.
 
-    Multi-block 6-2/5-3 style + LE start packs (incl. 19:00 for 8h nights).
+    No baked example scenario (length/annual/windows/patterns) — pass what the user set.
     """
     from logic.scheduling_sim import run_staffing_optimizer
 
-    rotation_variations = list(rotation_variations or ["6-2,5-3", "6-3,5-2"])
+    if shift_length_hours is None or float(shift_length_hours) <= 0:
+        return {
+            "success": False,
+            "message": "Shift length required for min-officer search",
+            "trials": [],
+        }
+    if annual_hours_target is None or float(annual_hours_target) <= 0:
+        return {
+            "success": False,
+            "message": "Annual hours target required for min-officer search",
+            "trials": [],
+        }
+    # Empty list = squad preset path; never inject example multi-block patterns
+    rotation_variations = list(rotation_variations or [])
     starts, auto_opts = _le_start_packs_for_length(
         float(shift_length_hours), list(shift_starts) if shift_starts else None
     )
     start_opts = [list(x) for x in shift_starts_options] if shift_starts_options else auto_opts
-    if extra_windows is None:
-        extra_windows = list(REAL_WORLD_8H_PRESET["extra_windows"])
+    # None or [] = no extra windows (do not inject Fri/Sat example)
+    extra_windows = list(extra_windows or [])
 
     lo, hi = max(1, int(lo)), max(int(lo), int(hi))
     best_n: Optional[int] = None
@@ -487,9 +499,9 @@ def find_min_officers_hard(
             shift_starts_options=start_opts,
             free_lengths=False,
             free_officer_counts=False,
-            free_starts=False,
+            free_starts=bool(not shift_starts),
             free_variations=False,
-            rotation_style="rotating",
+            rotation_style="rotating" if rotation_variations else "",
             rotation_variations=rotation_variations,
             annual_hours_target=float(annual_hours_target),
             annual_hours_variance=float(annual_hours_variance),
@@ -622,58 +634,205 @@ def early_impossible_proof(
     coverage_247: int,
     window_min: int,
     rotation_style: str = "rotating",
+    max_consecutive_work_days: int = 0,
+    min_rest_hours: float = 0.0,
+    avoid_flsa: bool = False,
+    flsa_work_period_days: int = 28,
+    flsa_threshold: Optional[float] = None,
+    rotation_type: str = "",
 ) -> Optional[str]:
-    """Return reason string if pattern math alone proves hard failure."""
+    """
+    Return reason if pattern math alone proves hard failure.
+
+    Person-days per cycle are phase-invariant: average daily ON = N × work_frac.
+    If that average is below a daily body floor, every stagger fails (min ≤ avg).
+    Use best-case work frac (max across offered patterns / squad rings) so mixed maps stay fair.
+    """
+    import math
+
     from logic.rotation_patterns import build_pattern, projected_annual_hours
 
-    vars_ = [v for v in (rotation_variations or []) if (v or "").strip()]
+    n = int(num_officers)
+    cov = int(coverage_247 or 0)
+    wmin = int(window_min or 0)
+    length = float(shift_length_hours)
+    max_c = int(max_consecutive_work_days or 0)
+    min_rest = float(min_rest_hours or 0)
 
-    if not vars_:
-        if coverage_247 > 0 and int(num_officers) < int(coverage_247):
-            return f"officers ({num_officers}) < 24/7 minimum ({coverage_247})"
-        if window_min > 0 and int(num_officers) < int(window_min):
-            return f"officers ({num_officers}) < window minimum ({window_min})"
+    if cov > 0 and n < cov:
+        return f"officers ({n}) < 24/7 minimum ({cov})"
+    if cov > 0 and length > 0:
+        need247 = max(1, math.ceil(24.0 / length)) * cov
+        if n < need247:
+            return f"officers ({n}) < 24/7 body floor ({need247} = ceil(24/{length:g})×{cov})"
+    if wmin > 0 and n < wmin:
+        return f"officers ({n}) < window minimum ({wmin})"
+
+    vars_ = [v for v in (rotation_variations or []) if (v or "").strip()]
+    patterns = []  # multi-block RotationPattern or squad _DutyRing
+    source = "pattern"
+
+    if vars_:
+        try:
+            patterns = [
+                build_pattern(
+                    t,
+                    style=rotation_style if rotation_style in ("fixed", "rotating") else None,
+                )
+                for t in vars_
+            ]
+        except ValueError as exc:
+            return f"invalid multi-block pattern: {exc}"
+        source = "multi-block"
+    elif (rotation_type or "").strip():
+        # Inline squad duty (avoid circular import with staffing_optimizer)
+        try:
+            from config import ROTATION_PRESETS
+
+            preset = ROTATION_PRESETS.get(str(rotation_type).strip())
+            if preset:
+                cycle_len = int(preset.get("cycle_length") or 1)
+                if "squad_patterns" in preset:
+                    for _name, pattern in (preset.get("squad_patterns") or {}).items():
+                        if pattern:
+
+                            class _R:
+                                def __init__(self, v):
+                                    self._v = [bool(x) for x in v]
+                                    self.cycle_length = len(self._v)
+
+                                def duty_vector(self):
+                                    return list(self._v)
+
+                                def work_days_per_cycle(self):
+                                    return sum(1 for x in self._v if x)
+
+                            patterns.append(_R(pattern))
+                elif "squad_a_days" in preset:
+                    squad_a = preset.get("squad_a_days") or set()
+
+                    class _R2:
+                        def __init__(self, v):
+                            self._v = list(v)
+                            self.cycle_length = len(self._v)
+
+                        def duty_vector(self):
+                            return list(self._v)
+
+                        def work_days_per_cycle(self):
+                            return sum(1 for x in self._v if x)
+
+                    patterns.append(_R2([(i + 1) in squad_a for i in range(cycle_len)]))
+                    patterns.append(_R2([(i + 1) not in squad_a for i in range(cycle_len)]))
+            source = "squad"
+        except Exception:
+            patterns = []
+
+    if not patterns:
+        # No duty model: absolute headcount only (conservative all-ON for 24/7 already above)
+        if cov > 0 and length > 0:
+            shifts_needed = math.ceil(24.0 / length)
+            if n < shifts_needed * cov:
+                return (
+                    f"need ≥{shifts_needed * cov} officers for {shifts_needed} "
+                    f"bands × 24/7 min {cov} (no rotation duty model)"
+                )
         return None
 
-    try:
-        patterns = [
-            build_pattern(
-                t,
-                style=rotation_style if rotation_style in ("fixed", "rotating") else None,
-            )
-            for t in vars_
-        ]
-    except ValueError as exc:
-        return f"invalid multi-block pattern: {exc}"
-
-    # Verify coverage bounds based on rotation math
     work_fracs = [p.work_days_per_cycle() / max(1, p.cycle_length) for p in patterns]
-    avg_work_frac = sum(work_fracs) / max(1, len(work_fracs))
-    max_daily_staffing = int(num_officers * avg_work_frac)
+    # Best-case average daily ON if officers pick highest-frac patterns/squads
+    best_frac = max(work_fracs) if work_fracs else 0.0
+    avg_daily = float(n) * float(best_frac)
 
-    if coverage_247 > 0:
-        import math
+    if cov > 0 and length > 0:
+        shifts_needed = math.ceil(24.0 / length)
+        working_needed = shifts_needed * cov
+        # Sound: min daily ON ≤ average daily ON always
+        if avg_daily + 1e-9 < float(working_needed):
+            return (
+                f"avg daily ON ≤{avg_daily:.1f} (best work frac {best_frac:.2%}, {source}) "
+                f"but 24/7 needs {working_needed} bodies ({shifts_needed} bands × {cov})"
+            )
 
-        shifts_needed = math.ceil(24.0 / float(shift_length_hours))
-        working_needed = shifts_needed * int(coverage_247)
-        if max_daily_staffing < working_needed:
-            return f"rotation supports max {max_daily_staffing} working/day, but 24/7 requires {working_needed} (for {shifts_needed} shifts)"
+    if wmin > 0 and avg_daily + 1e-9 < float(wmin):
+        return f"avg daily ON ≤{avg_daily:.1f} (best work frac {best_frac:.2%}, {source}) but window minimum is {wmin}"
 
-    if window_min > 0 and max_daily_staffing < int(window_min):
-        return f"rotation supports max {max_daily_staffing} working/day, but window minimum is {window_min}"
-
-    if annual_hours_hard:
-        hours = [
-            projected_annual_hours(patterns[i % len(patterns)], float(shift_length_hours))
-            for i in range(max(1, int(num_officers)))
-        ]
-        avg = sum(hours) / max(1, len(hours))
+    if annual_hours_hard and source == "multi-block":
+        # Feasible if some assignment of patterns to officers hits mean annual band
+        hours_opts = [projected_annual_hours(p, length) for p in patterns]
+        target = float(annual_hours_target)
         if float(annual_hours_variance or 0) > 0:
             band = float(annual_hours_variance)
         else:
-            band = abs(float(annual_hours_target)) * 0.02
-        if abs(avg - float(annual_hours_target)) > band + 1.0:
-            return f"pattern mean annual ~{avg:.0f}h outside {annual_hours_target:g}±{annual_hours_variance:g}"
+            band = abs(target) * 0.02
+        best_mean = min(hours_opts, key=lambda h: abs(h - target)) if hours_opts else 0.0
+        lo, hi = min(hours_opts), max(hours_opts)
+        can_hit = (lo - band) <= target <= (hi + band) or abs(best_mean - target) <= band + 1.0
+        if not can_hit:
+            return f"pattern annual hours [{lo:.0f}–{hi:.0f}] cannot hit {target:g}±{band:g}"
+    elif annual_hours_hard and source == "squad" and length > 0:
+        # Duck-typed annual from work frac (same formula as projected_annual_hours)
+        hours_opts = [round(p.work_days_per_cycle() / max(1, p.cycle_length) * 365.25 * length, 1) for p in patterns]
+        target = float(annual_hours_target)
+        band = float(annual_hours_variance) if float(annual_hours_variance or 0) > 0 else abs(target) * 0.02
+        lo, hi = min(hours_opts), max(hours_opts)
+        best_mean = min(hours_opts, key=lambda h: abs(h - target))
+        can_hit = (lo - band) <= target <= (hi + band) or abs(best_mean - target) <= band + 1.0
+        if not can_hit:
+            return f"squad annual hours [{lo:.0f}–{hi:.0f}] cannot hit {target:g}±{band:g}"
+
+    # Max consecutive ON: impossible if every offered duty ring exceeds the cap
+    if max_c > 0:
+
+        def _streak(vec: list) -> int:
+            if not vec:
+                return 0
+            doubled = list(vec) + list(vec)
+            best = streak = 0
+            for w in doubled:
+                if w:
+                    streak += 1
+                    best = max(best, streak)
+                else:
+                    streak = 0
+            return best
+
+        if all(_streak(p.duty_vector()) > max_c for p in patterns):
+            return f"all {source} duty rings exceed max consecutive work days ({max_c})"
+
+    # Min rest without pack: only fail when L≥24 (free starts can improve otherwise)
+    if min_rest > 0 and length > 0:
+        same = 24.0 - length
+        if same + 1e-6 < min_rest and length >= 24.0 - 1e-6:
+            return f"shift length {length:g}h cannot leave {min_rest:g}h rest between days"
+
+    # FLSA: sparsest period_days ON × L > thr ⇒ every fixed anchor fails (all rings)
+    if avoid_flsa and length > 0 and patterns:
+        try:
+            from logic.labor_compliance import flsa_threshold_for_period_days
+
+            period = max(7, min(int(flsa_work_period_days or 28), 28))
+            thr = float(flsa_threshold) if flsa_threshold is not None else float(flsa_threshold_for_period_days(period))
+
+            def _sparsest_on(vec: list, window: int) -> int:
+                if not vec or window < 1:
+                    return 0
+                nn = len(vec)
+                ring = [bool(x) for x in vec] * (window // nn + 3)
+                s = sum(1 for x in ring[:window] if x)
+                lo = s
+                for i in range(1, nn):
+                    s += (1 if ring[i + window - 1] else 0) - (1 if ring[i - 1] else 0)
+                    lo = min(lo, s)
+                return int(lo)
+
+            if all(float(_sparsest_on(p.duty_vector(), period)) * length > thr + 1e-6 for p in patterns):
+                return (
+                    f"all {source} rings exceed FLSA §207(k) ({thr:g}h / {period}d) "
+                    f"at {length:g}h shifts (sparsest period always over)"
+                )
+        except Exception:
+            pass
 
     return None
 

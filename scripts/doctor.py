@@ -77,22 +77,24 @@ def run_doctor(verbose: bool = False) -> int:
     try:
         init_database()
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("PRAGMA foreign_keys = ON")
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        required = {
-            "officers",
-            "day_off_requests",
-            "schedule_overrides",
-            "shift_swaps",
-            "app_users",
-            "notifications",
-            "payroll_entries",
-        }
-        missing = required - tables
-        if missing:
-            db_ok = False
-            db_detail = f"missing tables: {', '.join(sorted(missing))}"
-        conn.close()
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            required = {
+                "officers",
+                "day_off_requests",
+                "schedule_overrides",
+                "shift_swaps",
+                "app_users",
+                "notifications",
+                "payroll_entries",
+            }
+            missing = required - tables
+            if missing:
+                db_ok = False
+                db_detail = f"missing tables: {', '.join(sorted(missing))}"
+        finally:
+            conn.close()
     except Exception as exc:
         db_ok = False
         db_detail = str(exc)

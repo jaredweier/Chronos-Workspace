@@ -234,36 +234,34 @@ def validate_officer_certifications(
     as_of: Optional[date] = None,
 ) -> ValidationResult:
     """Required certifications for a shift band must be current."""
-    from database import get_connection
+    from database import connection
 
     check_date = as_of or date.today()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT t.code, t.name
-        FROM shift_cert_requirements r
-        JOIN certification_types t ON r.cert_type_id = t.id
-        WHERE r.shift_start = ? AND t.active = 1
-        """,
-        (shift_start,),
-    )
-    required = cursor.fetchall()
-    if not required:
-        conn.close()
-        return ValidationResult.pass_()
+    with connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT t.code, t.name
+            FROM shift_cert_requirements r
+            JOIN certification_types t ON r.cert_type_id = t.id
+            WHERE r.shift_start = ? AND t.active = 1
+            """,
+            (shift_start,),
+        )
+        required = cursor.fetchall()
+        if not required:
+            return ValidationResult.pass_()
 
-    cursor.execute(
-        """
-        SELECT t.code, c.expires_date
-        FROM officer_certifications c
-        JOIN certification_types t ON c.cert_type_id = t.id
-        WHERE c.officer_id = ? AND t.active = 1
-        """,
-        (officer_id,),
-    )
-    held = {r["code"]: r["expires_date"] for r in cursor.fetchall()}
-    conn.close()
+        cursor.execute(
+            """
+            SELECT t.code, c.expires_date
+            FROM officer_certifications c
+            JOIN certification_types t ON c.cert_type_id = t.id
+            WHERE c.officer_id = ? AND t.active = 1
+            """,
+            (officer_id,),
+        )
+        held = {r["code"]: r["expires_date"] for r in cursor.fetchall()}
 
     missing = []
     expired = []

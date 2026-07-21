@@ -155,8 +155,22 @@ def explain_staffing_result(result: Optional[Dict[str, Any]] = None) -> List[str
     evals = r.get("scenarios_evaluated")
     if evals is not None:
         # Title Case — Chronos summary + Playwright assert "Layouts Checked"
-        lines.append(f"Layouts Checked (exhaustive): {int(evals):,}")
+        lines.append(f"Layouts Checked: {int(evals):,}")
         lines.append(f"Combinations Tried: {int(evals):,}")
+    # Honest search mode (do not claim exhaustive when truncated / anytime)
+    mode = (r.get("constraints_applied") or {}).get("search_mode") or r.get("search_mode")
+    if r.get("search_exhaustive") is True:
+        mode_label = "Exhaustive"
+    elif r.get("budget_exhausted"):
+        mode_label = "Anytime (time limit)"
+    elif r.get("search_truncated"):
+        mode_label = "Partial (not every layout)"
+    elif mode:
+        mode_label = str(mode).replace("_", " ").title()
+    else:
+        mode_label = None
+    if mode_label:
+        lines.append(f"Search Mode: {mode_label}")
     full_n = r.get("full_sims_run")
     if full_n is not None:
         lines.append(f"Full Simulations: {int(full_n):,}")

@@ -5,13 +5,16 @@ from __future__ import annotations
 VERIFY_LADDER = """
 Verification tiers (strict supersets — use only these for ship claims):
 
-  python dev.py verify --tier fast       (~25s)   after each edit
-  python dev.py verify --tier preflight  (~35s)   pre-commit / handoff
-  python dev.py verify --tier check      (~3m)    ship gate (honest_gate)
-  python dev.py verify --tier full       (~5m)    release candidate
-  python dev.py verify --tier release    (~5–40m) full regression + ui-exhaustive (82 steps)
+  python dev.py verify --tier core       (~30–60s) product core unittests (not ship)
+  python dev.py verify --tier fast       (~45–90s) after each edit (audit + core-test + readiness)
+  python dev.py verify --tier preflight  (~1–2m)   pre-commit / handoff
+  python dev.py verify --tier check      (~3m)     ship gate (honest_gate; product tests only)
+  python dev.py verify --tier full       (~5m)     release candidate
+  python dev.py verify --tier release    (~5–40m)  full regression + ui-exhaustive (82 steps)
+  python dev.py verify --tier agent-meta (~30s)    token/route/verify tooling tests only
 
-Aliases: cheap-check → fast · preflight → preflight · check → check
+honest_gate true only on check|full|release. Audit 10/10 = historical only.
+Ship discover excludes tests/agent_meta/. Aliases: cheap-check → fast
 
 UI exhaustive (canonical — do not pipe through Select-Object):
 

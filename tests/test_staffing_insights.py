@@ -137,9 +137,12 @@ class StaffingInsightsTests(unittest.TestCase):
         from logic.scheduling_sim import compare_shift_length_scenarios
 
         t0 = time.time()
+        # Annual is required (no baked product default) — test fixture only
         r = compare_shift_length_scenarios(
             lengths=[8.0, 10.0],
             officer_count=8,
+            annual_hours_target=2008,
+            annual_hours_variance=40,
             simulation_days=21,
             depth="quick",
             require_hard_ok=True,

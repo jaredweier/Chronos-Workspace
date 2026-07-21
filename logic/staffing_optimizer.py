@@ -32,6 +32,60 @@ _OPT_THREAD_WORKERS = max(
     int(os.environ.get("SCHEDULER_OPT_THREAD_WORKERS", str(_OPT_THREAD_DEFAULT)) or _OPT_THREAD_DEFAULT),
 )
 
+# Bounded microcaches (cheap prune / pack filters). Cleared only by process lifetime;
+# keys are pure inputs so cross-run reuse is safe.
+_ANNUAL_HOURS_CACHE: Dict[Tuple[str, float], float] = {}
+_DUTY_VEC_CACHE: Dict[int, Tuple[bool, ...]] = {}
+_MAX_REST_PACK_CACHE: Dict[Tuple[Tuple[str, ...], float, int, int], int] = {}
+_PACK_WINDOW_BANDS_CACHE: Dict[Tuple[Tuple[str, ...], float, Tuple[Tuple[Any, ...], ...], Optional[int]], bool] = {}
+_MAX_ON_STREAK_CACHE: Dict[Tuple[Tuple[bool, ...], int], int] = {}
+_CACHE_CAP = 4096
+
+
+def _cache_put(store: Dict, key: Any, value: Any) -> Any:
+    if len(store) >= _CACHE_CAP:
+        # Drop an arbitrary ~25% (dict order = insertion) to bound memory
+        for i, k in enumerate(list(store.keys())):
+            if i >= _CACHE_CAP // 4:
+                break
+            del store[k]
+    store[key] = value
+    return value
+
+
+def _pattern_cache_key(pattern) -> str:
+    """Stable text key for RotationPattern / _DutyRing annual + duty caches."""
+    try:
+        return str(pattern.to_text())
+    except Exception:
+        try:
+            return str(tuple(pattern.duty_vector()))
+        except Exception:
+            return str(id(pattern))
+
+
+def _duty_vec_cached(pattern) -> Tuple[bool, ...]:
+    pid = id(pattern)
+    hit = _DUTY_VEC_CACHE.get(pid)
+    if hit is not None:
+        return hit
+    try:
+        vec = tuple(bool(x) for x in pattern.duty_vector())
+    except Exception:
+        vec = tuple()
+    return _cache_put(_DUTY_VEC_CACHE, pid, vec)
+
+
+def _projected_annual_cached(pattern, shift_length: float) -> float:
+    from logic.rotation_patterns import projected_annual_hours
+
+    key = (_pattern_cache_key(pattern), round(float(shift_length), 4))
+    hit = _ANNUAL_HOURS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    val = float(projected_annual_hours(pattern, shift_length))
+    return _cache_put(_ANNUAL_HOURS_CACHE, key, val)
+
 
 def _full_sim_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Top-level picklable worker for process-pool full sims."""
@@ -62,14 +116,9 @@ def _full_sim_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 # Full start-pack catalog size when starts are free (no artificial depth cap)
 FREE_STARTS_MAX_PACKS = 64
 
-MULTI_BLOCK_CATALOG: List[List[str]] = [
-    ["6-2,5-3", "6-3,5-2"],
-    ["5-2,6-3", "5-3,6-2"],
-    ["5-2", "5-3"],
-    ["4-3,3-4"],
-    ["6-2,5-3"],
-    ["5-3,6-2"],
-]
+# Legacy name kept for imports; content is example-only fallback if annual math empty.
+# Prefer generate_multi_block_variation_sets(annual, length) when free_variations.
+MULTI_BLOCK_CATALOG: List[List[str]] = []
 
 # Default soft priority when ranking near-misses (higher = more important to satisfy)
 DEFAULT_CONSTRAINT_WEIGHTS: Dict[str, float] = {
@@ -122,6 +171,30 @@ def _snap_to_half_hour(label: str) -> str:
     return _format_hhmm(total // 60, total % 60)
 
 
+def pack_meets_coverage_247(
+    starts: Sequence[str],
+    shift_length_hours: float,
+    coverage_247: int = 1,
+) -> bool:
+    """
+    True if pack can *possibly* support 24/7 occupancy ≥ coverage_247.
+
+    Only rejects when some half-hour has **zero** covering bands (stacking
+    cannot invent cover). Concurrent need (>1) is an assignment problem:
+    classic 06/14/22 @8h meets dual 24/7 with 2 officers per band.
+    Use bodies_needed_247 for the person floor.
+    """
+    need = int(coverage_247 or 0)
+    if need <= 0:
+        return True
+    if not starts:
+        return False
+    # Unique starts only — duplicate labels do not add timeline cover
+    uniq = list(dict.fromkeys(str(s) for s in starts if s))
+    # ≥1 band at thinnest sample; need itself is headcount not band count
+    return pack_window_band_capacity(uniq, float(shift_length_hours), "00:00", "23:59") >= 1
+
+
 def generate_start_packs(
     shift_length_hours: float,
     *,
@@ -129,11 +202,49 @@ def generate_start_packs(
     num_officers: int = 6,
     max_bands: Optional[int] = None,
     min_bands: int = 2,
+    extra_windows: Optional[List[Dict]] = None,
+    coverage_247: int = 0,
+    filter_infeasible: bool = True,
+    min_rest_hours: float = 0.0,
+    nearby_hops: int = 1,
 ) -> List[List[str]]:
+    """
+    Build start-time packs on a 30-minute grid.
+
+    When filter_infeasible and hard-ish coverage is set (windows / 24/7 / min rest),
+    drop packs that cannot possibly cover those arcs — L2 domain reduction before search.
+    """
     import itertools
+    import math
 
     packs: List[List[str]] = []
     seen = set()
+    length = float(shift_length_hours)
+    cov = int(coverage_247 or 0)
+    wins = list(extra_windows or []) if extra_windows else []
+    min_rest = float(min_rest_hours or 0)
+    # L2: when coverage constraints bind, do not flood C(n,k) to 1000 —
+    # search already only uses priority head (~48–64).
+    if filter_infeasible and (cov > 0 or wins or min_rest > 0):
+        max_packs = min(int(max_packs), int(FREE_STARTS_MAX_PACKS))
+
+    def _feasible(uniq: List[str]) -> bool:
+        if not filter_infeasible:
+            return True
+        if cov > 0 and not pack_meets_coverage_247(uniq, length, cov):
+            return False
+        if wins and not pack_meets_window_bands(uniq, length, wins, num_officers=num_officers):
+            return False
+        if min_rest > 0:
+            mx = max_rest_minutes_for_pack(
+                uniq,
+                length,
+                day_gap_days=1,
+                nearby_hops=int(nearby_hops or 0),
+            )
+            if mx < min_rest * 60.0 - 1.0:
+                return False
+        return True
 
     def _add(starts: Sequence[str]) -> None:
         cleaned = [_snap_to_half_hour(s) for s in starts if s]
@@ -147,6 +258,8 @@ def generate_start_packs(
             return
         key = tuple(sorted(uniq))
         if key in seen:
+            return
+        if not _feasible(uniq):
             return
         seen.add(key)
         packs.append(list(uniq))
@@ -172,9 +285,24 @@ def generate_start_packs(
         "02:00",  # Midnight
     ]
 
-    # Equal-spaced bands generated FIRST so they are never crowded out by the
-    # combinatorial section hitting max_packs.  These are the most analytically
-    # sound packs for coverage analysis.
+    # Priority LE-sane packs FIRST (never crowded out by C(n,k) explosion).
+    # Shapes only — not a single department scenario: equal-space, evening denser,
+    # 12h dual, staggered 10h-class. Caller constraints decide which hard-pass.
+    for seed in (
+        ["06:00", "14:00", "22:00"],
+        ["06:00", "14:00", "19:00", "22:00"],
+        ["07:00", "15:00", "23:00"],
+        ["07:00", "15:00", "19:00", "23:00"],
+        ["06:00", "18:00"],
+        ["07:00", "19:00"],
+        ["05:00", "13:00", "21:00"],
+        ["08:00", "16:00", "00:00"],
+        ["06:00", "12:00", "18:00", "00:00"],
+        ["07:00", "13:00", "19:00", "01:00"],
+    ):
+        _add(seed)
+
+    # Equal-spaced bands from anchors
     anchors = ["05:00", "06:00", "07:00", "18:00", "19:00"]
     for spacing_h in [6, 8, 12]:
         spacing_min = spacing_h * 60
@@ -191,15 +319,18 @@ def generate_start_packs(
                 pass
 
     # Prefer explicit max_bands; else HEAD-style cap by roster size (≤6).
+    # 24/7 implies at least ceil(24/L) bands.
+    min_k = max(2, int(min_bands or 2))
+    if cov > 0 and length > 0:
+        min_k = max(min_k, int(math.ceil(24.0 / length)))
     if max_bands is None:
         max_combos = min(max(2, int(num_officers or 2)), 6)
     else:
         max_combos = min(max(int(min_bands or 2), int(max_bands)), 8)
-    min_k = max(2, int(min_bands or 2))
     if min_k > max_combos:
         max_combos = min_k
 
-    # Add min_k through max_combos-band combinations from core_starts
+    # Combinatorial fill after priority seeds (may hit max_packs)
     for k in range(min_k, max_combos + 1):
         for combo in itertools.combinations(core_starts, k):
             _add(combo)
@@ -207,6 +338,18 @@ def generate_start_packs(
                 break
         if len(packs) >= max_packs:
             break
+
+    # If filters wiped everything, return unfiltered priority seeds so soft mode
+    # can still rank near-misses (never empty domain silently).
+    if not packs and filter_infeasible and (cov > 0 or wins or min_rest > 0):
+        return generate_start_packs(
+            length,
+            max_packs=max(16, max_packs // 4),
+            num_officers=num_officers,
+            max_bands=max_bands,
+            min_bands=min_bands,
+            filter_infeasible=False,
+        )[: max(8, min(32, max_packs))]
 
     return packs[:max_packs]
 
@@ -333,6 +476,172 @@ def generate_pattern_maps(n_slots: int, n_patterns: int) -> List[List[int]]:
     return maps
 
 
+def _window_weekdays_from_extra(
+    extra_windows: Optional[List[Dict]] = None,
+    *,
+    default: Tuple[int, ...] = (4, 5),
+) -> Tuple[int, ...]:
+    """Weekdays (0=Mon) that carry a window min floor; default Fri/Sat."""
+    if not extra_windows:
+        return default
+    found: List[int] = []
+    for w in extra_windows:
+        if not isinstance(w, dict) or not w.get("enabled", True):
+            continue
+        try:
+            need = int(w.get("min_officers") or 0)
+        except (TypeError, ValueError):
+            need = 0
+        if need <= 0:
+            continue
+        raw = w.get("weekday", w.get("weekdays", w.get("dow")))
+        if raw is None:
+            # Unscoped window → all days
+            return tuple(range(7))
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                try:
+                    found.append(int(item) % 7)
+                except (TypeError, ValueError):
+                    continue
+        else:
+            try:
+                found.append(int(raw) % 7)
+            except (TypeError, ValueError):
+                continue
+    return tuple(sorted(set(found))) if found else default
+
+
+def bodies_needed_247(shift_length_hours: float, coverage_247: int) -> int:
+    """
+    Concurrent person-floor for 24/7: each ON officer covers one shift of length L.
+    Need ceil(24/L)×coverage_247 (stacking allowed — e.g. 8h dual = 3 bands × 2 = 6).
+    """
+    import math
+
+    cov = max(0, int(coverage_247 or 0))
+    if cov <= 0:
+        return 0
+    length = float(shift_length_hours or 0)
+    if length <= 0:
+        return cov
+    bands = max(1, math.ceil(24.0 / length))
+    return int(bands * cov)
+
+
+def rest_gap_minutes(
+    prev_start: str,
+    curr_start: str,
+    shift_length_hours: float,
+    *,
+    day_gap_days: int = 1,
+) -> int:
+    """
+    Rest minutes from end of prev shift to start of next (matches simulator hard gate).
+
+    Overnight: end clock ≤ start clock ⇒ end is next calendar morning.
+    day_gap_days: calendar days between the two work dates (1 = consecutive days).
+    """
+    ps = _hhmm_to_min(prev_start)
+    length_min = max(0, int(round(float(shift_length_hours) * 60)))
+    pe_clock = (ps + length_min) % (24 * 60)
+    if length_min > 0 and pe_clock <= ps:
+        pe_abs = pe_clock + 24 * 60
+    else:
+        pe_abs = pe_clock
+    gap = max(0, int(day_gap_days))
+    curr_abs = gap * 24 * 60 + _hhmm_to_min(curr_start)
+    return int(curr_abs - pe_abs)
+
+
+def max_rest_minutes_for_pack(
+    shift_starts: Sequence[str],
+    shift_length_hours: float,
+    *,
+    day_gap_days: int = 1,
+    nearby_hops: int = 0,
+) -> int:
+    """Best rest achievable between two work days using pack starts (± nearby hops)."""
+    starts = list(shift_starts or [])
+    hops = max(0, int(nearby_hops or 0))
+    gap = int(day_gap_days or 1)
+    if not starts:
+        # No pack: same-start rest only (conservative; free clock can do better)
+        return max(0, 24 * 60 - max(0, int(round(float(shift_length_hours) * 60))))
+    ckey = (tuple(sorted(str(s) for s in starts)), float(shift_length_hours), gap, hops)
+    hit = _MAX_REST_PACK_CACHE.get(ckey)
+    if hit is not None:
+        return int(hit)
+    expanded = set(starts)
+    if hops > 0:
+        for s in starts:
+            base = _hhmm_to_min(s)
+            for h in range(-hops, hops + 1):
+                m = (base + h * 30) % (24 * 60)
+                expanded.add(f"{m // 60:02d}:{m % 60:02d}")
+    labels = list(expanded)
+    best = 0
+    for s1 in labels:
+        for s2 in labels:
+            best = max(best, rest_gap_minutes(s1, s2, shift_length_hours, day_gap_days=gap))
+    return int(_cache_put(_MAX_REST_PACK_CACHE, ckey, int(best)))
+
+
+def pattern_has_adjacent_on(vec: Sequence[bool], phase: int = 0) -> bool:
+    """True if duty ring has two consecutive ON days (wrap-aware over 2 cycles)."""
+    if not vec:
+        return False
+    n = len(vec)
+    for d in range(2 * n - 1):
+        a = bool(vec[(d + int(phase)) % n])
+        b = bool(vec[(d + 1 + int(phase)) % n])
+        if a and b:
+            return True
+    return False
+
+
+def _cheap_rest_fail(
+    patterns,
+    phases: List[int],
+    pat_map: List[int],
+    *,
+    n_slots: int,
+    shift_length: float,
+    shift_starts: Optional[Sequence[str]],
+    min_rest_hours: float,
+    nearby_hops: int = 0,
+) -> bool:
+    """
+    True if consecutive ON days exist and *no* pack start pair can meet min rest.
+
+    Sound prune only (does not fail when some pair works — assignment may still fail full sim).
+    """
+    need = float(min_rest_hours or 0)
+    if need <= 0 or not patterns or n_slots < 1:
+        return False
+    # Any officer with adjacent ON days?
+    has_adj = False
+    for i in range(n_slots):
+        p = patterns[int(pat_map[i]) % len(patterns)]
+        vec = _duty_vec_cached(p)
+        if not vec:
+            continue
+        ph = int(phases[i]) % max(len(vec), 1)
+        if pattern_has_adjacent_on(vec, ph):
+            has_adj = True
+            break
+    if not has_adj:
+        return False
+    max_r = max_rest_minutes_for_pack(
+        list(shift_starts or []),
+        float(shift_length),
+        day_gap_days=1,
+        nearby_hops=int(nearby_hops or 0),
+    )
+    # 1-minute tolerance matches simulator
+    return max_r < need * 60.0 - 1.0
+
+
 def _day_body_counts(
     patterns,
     phases: List[int],
@@ -341,15 +650,21 @@ def _day_body_counts(
     n_slots: int,
     simulation_days: int,
     sim_start: date,
+    window_weekdays: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], List[int]]:
-    """Fast body counts — precompute shifted duty rings (Python hot path; Rust full-sim separate)."""
+    """Fast body counts — precompute shifted duty rings (Python hot path; Rust full-sim separate).
+
+    Returns (day_counts, window_day_counts) where window_day_counts are ON bodies
+    on weekdays in window_weekdays (default Fri/Sat).
+    """
     cycle = patterns[0].cycle_length
     n_days = max(simulation_days, cycle)
+    wds = set(int(x) % 7 for x in (window_weekdays if window_weekdays is not None else (4, 5)))
     # Precompute each slot's duty mask for day_offset 0..n_days-1
     slot_work: List[List[bool]] = []
     for i in range(n_slots):
         p = patterns[pat_map[i] % len(patterns)]
-        vec = p.duty_vector()
+        vec = _duty_vec_cached(p)
         n = len(vec)
         phase = int(phases[i]) % max(cycle, 1)
         if not n:
@@ -358,7 +673,7 @@ def _day_body_counts(
         # rotated view: day d uses vec[(d+phase)%n]
         slot_work.append([bool(vec[(d + phase) % n]) for d in range(n_days)])
     day_counts: List[int] = [0] * n_days
-    fri_sat: List[int] = []
+    window_days: List[int] = []
     base_wd = sim_start.weekday()
     for d in range(n_days):
         c = 0
@@ -366,9 +681,237 @@ def _day_body_counts(
             if slot_work[i][d]:
                 c += 1
         day_counts[d] = c
-        if (base_wd + d) % 7 in (4, 5):
-            fri_sat.append(c)
-    return day_counts, fri_sat
+        if (base_wd + d) % 7 in wds:
+            window_days.append(c)
+    return day_counts, window_days
+
+
+def _max_on_streak(vec: Sequence[bool], phase: int = 0) -> int:
+    """Max consecutive ON days over two cycles (wrap-aware)."""
+    if not vec:
+        return 0
+    vkey = tuple(bool(x) for x in vec)
+    ph = int(phase) % max(len(vkey), 1)
+    ckey = (vkey, ph)
+    hit = _MAX_ON_STREAK_CACHE.get(ckey)
+    if hit is not None:
+        return int(hit)
+    n = len(vkey)
+    doubled = [bool(vkey[(i + ph) % n]) for i in range(2 * n)]
+    best = 0
+    streak = 0
+    for w in doubled:
+        if w:
+            streak += 1
+            best = max(best, streak)
+        else:
+            streak = 0
+    return int(_cache_put(_MAX_ON_STREAK_CACHE, ckey, int(best)))
+
+
+def on_days_in_window_extremes(vec: Sequence[bool], window: int) -> Tuple[int, int]:
+    """
+    (sparsest, densest) ON-day counts over any contiguous `window` on the duty ring.
+
+    Phase-invariant for a pure cycle. Sparsest × length > FLSA thr ⇒ every fixed
+    period fails (sound hard prune). Densest × length ≤ thr ⇒ never fails.
+    """
+    if not vec or window < 1:
+        return 0, 0
+    n = len(vec)
+    w = int(window)
+    # Ring long enough for one full set of start offsets
+    ring = [bool(x) for x in vec] * (w // n + 3)
+    s = sum(1 for x in ring[:w] if x)
+    lo = hi = s
+    for i in range(1, n):
+        s += (1 if ring[i + w - 1] else 0) - (1 if ring[i - 1] else 0)
+        lo = min(lo, s)
+        hi = max(hi, s)
+    return int(lo), int(hi)
+
+
+def pattern_flsa_always_fails(
+    vec: Sequence[bool],
+    shift_length_hours: float,
+    *,
+    period_days: int = 28,
+    threshold: float = 171.0,
+) -> bool:
+    """True if every contiguous period_days block exceeds §207(k) hours (sound)."""
+    if period_days < 1 or threshold <= 0 or not vec:
+        return False
+    lo, _hi = on_days_in_window_extremes(vec, int(period_days))
+    return float(lo) * float(shift_length_hours) > float(threshold) + 1e-6
+
+
+class _DutyRing:
+    """Minimal pattern stand-in for squad presets in cheap prune (duty only)."""
+
+    __slots__ = ("_vec", "cycle_length", "label")
+
+    def __init__(self, vec: Sequence[bool], *, label: str = ""):
+        self._vec = [bool(x) for x in vec]
+        self.cycle_length = max(1, len(self._vec))
+        self.label = label or "duty"
+
+    def duty_vector(self) -> List[bool]:
+        return list(self._vec)
+
+    def work_days_per_cycle(self) -> int:
+        return sum(1 for x in self._vec if x)
+
+
+def duty_patterns_from_rotation(rotation_type: str) -> List[_DutyRing]:
+    """Squad preset → duty rings for cheap prune / FLSA (not multi-block algebra)."""
+    try:
+        from config import ROTATION_PRESETS
+    except Exception:
+        return []
+    preset = ROTATION_PRESETS.get(rotation_type) or ROTATION_PRESETS.get(str(rotation_type or "").strip())
+    if not preset:
+        return []
+    cycle_len = int(preset.get("cycle_length") or 1)
+    out: List[_DutyRing] = []
+    if "squad_patterns" in preset:
+        for name, pattern in (preset.get("squad_patterns") or {}).items():
+            if pattern:
+                out.append(_DutyRing([bool(x) for x in pattern], label=str(name)))
+    elif "squad_a_days" in preset:
+        squad_a = preset.get("squad_a_days") or set()
+        out.append(_DutyRing([(i + 1) in squad_a for i in range(cycle_len)], label="A"))
+        # Complement squad B (classic 2-squad)
+        out.append(_DutyRing([(i + 1) not in squad_a for i in range(cycle_len)], label="B"))
+    return out
+
+
+def is_night_start(start: str) -> bool:
+    try:
+        hour = int(str(start).split(":")[0])
+    except (TypeError, ValueError):
+        return False
+    return hour >= 18 or hour < 6
+
+
+def pack_has_night_start(starts: Optional[Sequence[str]]) -> bool:
+    return any(is_night_start(s) for s in (starts or []) if s)
+
+
+def overnight_coverage_forced(
+    *,
+    coverage_247: int = 0,
+    extra_windows: Optional[List[Dict]] = None,
+    shift_length_hours: float = 8.0,
+) -> bool:
+    """True if 24/7 or a window arc requires staffing through night hours."""
+    if int(coverage_247 or 0) > 0:
+        return True
+    night_samples = [22 * 60, 0, 2 * 60, 4 * 60]  # 22:00, 00:00, 02:00, 04:00
+    for w in extra_windows or []:
+        if not isinstance(w, dict) or not w.get("enabled", True):
+            continue
+        try:
+            need = int(w.get("min_officers") or 0)
+        except (TypeError, ValueError):
+            need = 0
+        if need <= 0:
+            continue
+        samples = _window_sample_minutes(
+            str(w.get("start_time") or "00:00"),
+            str(w.get("end_time") or "23:59"),
+        )
+        if any(
+            m in samples or _minute_in_window(m, str(w.get("start_time") or "00:00"), str(w.get("end_time") or "23:59"))
+            for m in night_samples
+        ):
+            return True
+        # Overlap any night sample with window
+        for m in night_samples:
+            if _minute_in_window(
+                m,
+                str(w.get("start_time") or "00:00"),
+                str(w.get("end_time") or "23:59"),
+            ):
+                return True
+    del shift_length_hours
+    return False
+
+
+def _window_sample_minutes(win_start: str, win_end: str, step: int = 30) -> List[int]:
+    ws = _hhmm_to_min(win_start)
+    we = _hhmm_to_min(win_end)
+    samples: List[int] = []
+    if we > ws:
+        t = ws
+        while t < we:
+            samples.append(t)
+            t += step
+    else:
+        t = ws
+        while t < 24 * 60:
+            samples.append(t)
+            t += step
+        t = 0
+        while t < we:
+            samples.append(t)
+            t += step
+    return samples
+
+
+def _minute_in_window(minute: int, win_start: str, win_end: str) -> bool:
+    ws = _hhmm_to_min(win_start)
+    we = _hhmm_to_min(win_end)
+    m = int(minute) % (24 * 60)
+    if we > ws:
+        return ws <= m < we
+    return m >= ws or m < we
+
+
+def _cheap_flsa_fail(
+    patterns,
+    phases: List[int],
+    pat_map: List[int],
+    *,
+    n_slots: int,
+    shift_length: float,
+    simulation_days: int,
+    period_days: int,
+    threshold: float,
+) -> bool:
+    """True if any officer's duty ring fails fixed-anchor FLSA for all anchors."""
+    if period_days < 1 or threshold <= 0 or not patterns:
+        return False
+    # Fast sound path: sparsest period always over threshold
+    for i in range(n_slots):
+        p = patterns[int(pat_map[i]) % len(patterns)]
+        vec = p.duty_vector()
+        if pattern_flsa_always_fails(
+            vec,
+            float(shift_length),
+            period_days=int(period_days),
+            threshold=float(threshold),
+        ):
+            return True
+    try:
+        from simulator import _flsa_period_hours_ok
+    except Exception:
+        return False
+    n_days = max(int(simulation_days), int(patterns[0].cycle_length), int(period_days))
+    for i in range(n_slots):
+        p = patterns[int(pat_map[i]) % len(patterns)]
+        vec = p.duty_vector()
+        if not vec:
+            continue
+        # Skip slow path when densest cannot exceed thr (always OK)
+        _lo, hi = on_days_in_window_extremes(vec, int(period_days))
+        if float(hi) * float(shift_length) <= float(threshold) + 1e-6:
+            continue
+        n = len(vec)
+        phase = int(phases[i]) % n
+        flags = [bool(vec[(d + phase) % n]) for d in range(n_days)]
+        if not _flsa_period_hours_ok(flags, float(shift_length), int(period_days), float(threshold)):
+            return True
+    return False
 
 
 def _shift_end_hhmm(start: str, length_hours: float) -> str:
@@ -416,13 +959,15 @@ def _cheap_window_minute_fail(
             mn = 0
         if mn <= 0:
             continue
+        from logic.coverage_timeline import normalize_weekdays
+
         win_objs.append(
             CoverageWindow(
                 min_officers=mn,
                 start_time=str(w.get("start_time") or "00:00"),
                 end_time=str(w.get("end_time") or "23:59"),
                 specific_date=None,
-                weekday=w.get("weekday"),
+                weekday=normalize_weekdays(w.get("weekday", w.get("weekdays", w.get("dow")))),
                 label=str(w.get("label") or "Window"),
             )
         )
@@ -441,13 +986,42 @@ def _cheap_window_minute_fail(
 
     hops = max(0, int(nearby_hops if nearby_hops is not None else 1))
     need_any_day = any(w.weekday is None and w.specific_date is None for w in win_objs)
-    weekdays = {w.weekday for w in win_objs if w.weekday is not None}
+    weekdays: set = set()
+    for w in win_objs:
+        wset = w.weekday_set()
+        if wset is not None:
+            weekdays |= wset
     home_for_slot = [starts[i % len(starts)] for i in range(n_slots)]
+    # Prior-day overnight tails for morning/post-midnight window minutes
+    # (mirrors simulator phase-3 seed: only true overnight end≤start).
+    prev_overnight: List[Tuple[date, str, str]] = []
+
+    def _overnight_tails(work_date: date, bands_or_asg) -> List[Tuple[date, str, str]]:
+        out: List[Tuple[date, str, str]] = []
+        for item in bands_or_asg:
+            if len(item) == 3:
+                _wd, st, en = item[0], item[1], item[2]
+            else:
+                st, en = item[0], item[1]
+            try:
+                sm = _hhmm_to_min(st)
+                em = _hhmm_to_min(en)
+            except Exception:
+                continue
+            if em <= sm:
+                out.append((work_date, st, en))
+        return out
+
     for day_offset in range(n_days):
         day = sim_start + timedelta(days=day_offset)
         wd = day.weekday()
-        if not need_any_day and wd not in weekdays:
-            continue
+        # Always build duty seats so overnight handoff stays continuous even on
+        # non-window weekdays (skipping would drop prior tails into window days).
+        day_wins = [w for w in win_objs if w.matches_date(day)]
+        win_need = max((int(w.min_officers or 0) for w in day_wins), default=0)
+        primary = max(day_wins, key=lambda w: int(w.min_officers or 0)) if day_wins else None
+        win_start = str(primary.start_time or "19:00") if primary else "19:00"
+        win_end = str(primary.end_time or "03:00") if primary else "03:00"
         working_idx = []
         off_idx = []
         for i in range(n_slots):
@@ -457,7 +1031,6 @@ def _cheap_window_minute_fail(
                 working_idx.append(i)
             else:
                 off_idx.append(i)
-        fri_sat = wd in (4, 5)
         homes = [home_for_slot[i] for i in working_idx]
         bands = assign_pack_starts_for_coverage(
             len(working_idx),
@@ -465,42 +1038,53 @@ def _cheap_window_minute_fail(
             length,
             home_starts=homes,
             min_per_shift=1,
-            fri_sat_window=fri_sat,
+            fri_sat_window=win_need > 0,
             nearby_hops=hops,
+            window_min=win_need,
+            window_start=win_start,
+            window_end=win_end,
         )
         asg = [(day, st, en) for st, en in bands]
-        # Off-day call-in only when user opted in
-        if allow_offday_coverage and fri_sat:
-            win_need = max(
-                (int(w.min_officers or 0) for w in win_objs if w.matches_date(day)),
-                default=0,
-            )
-            if win_need > 0 and len(working_idx) < win_need:
+        # Off-day call-in only when user opted in (any window day, not Fri/Sat only)
+        if allow_offday_coverage and win_need > 0 and day_wins:
+            if len(working_idx) < win_need:
                 short = win_need - len(working_idx)
+                # Prefer starts covering the window arc
+                prefer_st = win_start
                 for oi in off_idx:
                     if short <= 0:
                         break
                     home = home_for_slot[oi]
                     pick = home if home in starts else starts[0]
+                    # Prefer a pack start near the window open
+                    best_d, best = 10**9, pick
                     for cand in starts:
-                        if abs(_hhmm_to_min(cand) - 19 * 60) <= 30:
-                            hm = _hhmm_to_min(home)
-                            if abs(hm - 19 * 60) <= 8 * 60 or hm >= 14 * 60:
-                                pick = cand
-                                break
+                        d = abs(_hhmm_to_min(cand) - _hhmm_to_min(prefer_st))
+                        d = min(d, 24 * 60 - d)
+                        if d < best_d:
+                            best_d, best = d, cand
+                    pick = best
                     asg.append((day, pick, _shift_end_hhmm(pick, length)))
                     short -= 1
-        for wo in win_objs:
-            if not wo.matches_date(day):
-                continue
-            chk = check_coverage_window(asg, wo, day, step_minutes=30)
-            if not chk.get("skipped") and not chk.get("ok", True):
-                return True
+        # Day-0 steady-state seed (same as simulator): treat today's overnight
+        # bands as if they also ran yesterday so 00:00–morning is covered.
+        prior = list(prev_overnight)
+        if day_offset == 0 and not prior:
+            for _wd, st, en in _overnight_tails(day, asg):
+                prior.append((day - timedelta(days=1), st, en))
+        asg_with_prior = prior + asg
+        if day_wins:
+            for wo in day_wins:
+                chk = check_coverage_window(asg_with_prior, wo, day, step_minutes=30)
+                if not chk.get("skipped") and not chk.get("ok", True):
+                    return True
+        # Advance overnight handoff for the next calendar morning
+        prev_overnight = _overnight_tails(day, asg)
     return False
 
 
 def _window_body_floor(windows: Optional[List[Dict]], *, use_windows: bool) -> int:
-    """Min bodies that must work Fri/Sat days for extra windows to be possible."""
+    """Max min_officers across enabled windows (moment floor; not serial-band total)."""
     if not use_windows or not windows:
         return 0
     need = 0
@@ -592,6 +1176,33 @@ def pack_meets_window_bands(
     """
     if not windows:
         return True
+
+    def _win_need(w: Dict) -> int:
+        try:
+            return int(w.get("min_officers") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    win_key = tuple(
+        (
+            str(w.get("start_time") or w.get("start") or ""),
+            str(w.get("end_time") or w.get("end") or ""),
+            _win_need(w),
+            bool(w.get("enabled", True)),
+        )
+        for w in windows
+        if isinstance(w, dict)
+    )
+    ckey = (
+        tuple(str(s) for s in starts),
+        float(shift_length_hours),
+        win_key,
+        int(num_officers) if num_officers is not None else None,
+    )
+    hit = _PACK_WINDOW_BANDS_CACHE.get(ckey)
+    if hit is not None:
+        return bool(hit)
+    ok = True
     for w in windows:
         if not isinstance(w, dict) or not w.get("enabled", True):
             continue
@@ -602,13 +1213,15 @@ def pack_meets_window_bands(
         if need <= 0:
             continue
         if num_officers is not None and need > int(num_officers):
-            return False
-        st = str(w.get("start_time") or "00:00")
-        en = str(w.get("end_time") or "23:59")
+            ok = False
+            break
+        st = str(w.get("start_time") or w.get("start") or "00:00")
+        en = str(w.get("end_time") or w.get("end") or "23:59")
         # Any covering band at the thinnest sample?
         if pack_window_band_capacity(starts, shift_length_hours, st, en) < 1:
-            return False
-    return True
+            ok = False
+            break
+    return bool(_cache_put(_PACK_WINDOW_BANDS_CACHE, ckey, ok))
 
 
 def _cheap_reject(
@@ -633,16 +1246,38 @@ def _cheap_reject(
     precomputed: Optional[Tuple[List[int], List[int]]] = None,
     nearby_hops: int = 1,
     allow_offday_coverage: bool = False,
+    avoid_flsa: bool = False,
+    flsa_period_days: int = 28,
+    flsa_threshold: float = 171.0,
+    max_consecutive_work_days: int = 0,
+    min_rest_hours: float = 0.0,
+    night_minimum: int = 0,
+    rotation_type: str = "",
+    skip_window_minute: bool = False,
 ) -> Optional[str]:
-    """Prune layouts that cannot possibly meet hard floors (bodies / pattern annual mean)."""
-    from logic.rotation_patterns import projected_annual_hours
+    """Prune layouts that cannot possibly meet hard floors (bodies / pattern annual mean).
 
-    del n_bands  # kept for API compat; window floor uses window_min from extra_windows
+    skip_window_minute: when True, skip C3 minute-bin (heavy). Caller may defer
+    minute checks to top-ranked candidates only — full sim remains truth.
+    """
+    del n_bands  # pack size is not a daily body-floor multiplier
+    # Squad path: synthesize duty rings when multi-block patterns absent
+    if not patterns and rotation_type:
+        patterns = duty_patterns_from_rotation(rotation_type)
+        if patterns and phases is not None and pat_map is not None:
+            if len(phases) < n_slots:
+                phases = list(phases) + [0] * (n_slots - len(phases))
+            if len(pat_map) < n_slots:
+                # Round-robin squads
+                n_pat = len(patterns)
+                pat_map = [i % n_pat for i in range(n_slots)]
     if patterns:
         if annual_hard:
             # Pattern math is cycle-based year-average — phase does not change hours.
-            # Reject only when *mean* projected is outside target band (not peer equality).
-            hours = [projected_annual_hours(patterns[pat_map[i] % len(patterns)], shift_length) for i in range(n_slots)]
+            # Match simulator: mean outside band OR unfair spread (max−min > 2×variance).
+            hours = [
+                _projected_annual_cached(patterns[pat_map[i] % len(patterns)], shift_length) for i in range(n_slots)
+            ]
             avg = sum(hours) / max(len(hours), 1)
             # B4 fix: only apply the 2% floor when variance is truly unset (<=0).
             # Never silently override a user-set tight variance (e.g. ±20h).
@@ -652,30 +1287,103 @@ def _cheap_reject(
                 band = abs(float(annual_target)) * 0.02
             if abs(avg - float(annual_target)) > band + 1e-6:
                 return "annual"
+            if hours and (max(hours) - min(hours)) > max(band * 2.0, 40.0) + 1e-6:
+                return "annual"
+        # Max consecutive ON days — pattern-intrinsic (phase cannot shorten longest ON run)
+        max_c = int(max_consecutive_work_days or 0)
+        if max_c > 0:
+            for i in range(n_slots):
+                p = patterns[int(pat_map[i]) % len(patterns)]
+                vec = _duty_vec_cached(p)
+                if not vec:
+                    continue
+                ph = int(phases[i]) % max(len(vec), 1)
+                if _max_on_streak(vec, ph) > max_c:
+                    return "consecutive"
+        # Min rest: consecutive ON + pack cannot achieve rest (start-pair best case)
+        if float(min_rest_hours or 0) > 0 and _cheap_rest_fail(
+            patterns,
+            phases,
+            pat_map,
+            n_slots=n_slots,
+            shift_length=shift_length,
+            shift_starts=shift_starts,
+            min_rest_hours=float(min_rest_hours),
+            nearby_hops=nearby_hops,
+        ):
+            return "rest"
+        # FLSA fixed-anchor prune (optional hard)
+        if avoid_flsa and _cheap_flsa_fail(
+            patterns,
+            phases,
+            pat_map,
+            n_slots=n_slots,
+            shift_length=shift_length,
+            simulation_days=simulation_days,
+            period_days=int(flsa_period_days or 28),
+            threshold=float(flsa_threshold or 171.0),
+        ):
+            return "flsa"
+        win_wds = _window_weekdays_from_extra(extra_windows if use_windows else None)
         if precomputed is not None:
-            day_counts, fri_sat = precomputed
+            day_counts, window_day_counts = precomputed
         else:
-            day_counts, fri_sat = _day_body_counts(
+            day_counts, window_day_counts = _day_body_counts(
                 patterns,
                 phases,
                 pat_map,
                 n_slots=n_slots,
                 simulation_days=simulation_days,
                 sim_start=sim_start,
+                window_weekdays=win_wds,
             )
-        if cov247 > 0 and day_counts and min(day_counts) < cov247:
-            return "coverage_247"
+        # 24/7 needs concurrent person-hours, not just min officers at one moment
+        if cov247 > 0 and day_counts:
+            need247 = bodies_needed_247(shift_length, cov247)
+            if min(day_counts) < need247:
+                return "coverage_247"
+        # Night minimum (Fri/Sat high-risk): only when overnight cover is forced
+        # (24/7 or night window). Soft metric alone does not hard-fail empty night bands.
+        nmin = max(0, int(night_minimum or 0))
+        if (
+            nmin > 0
+            and pack_has_night_start(shift_starts)
+            and overnight_coverage_forced(
+                coverage_247=cov247,
+                extra_windows=extra_windows if use_windows else None,
+                shift_length_hours=shift_length,
+            )
+        ):
+            # Fri/Sat body floor for high-risk nights (config.is_high_risk_night)
+            _, fri_sat_bodies = _day_body_counts(
+                patterns,
+                phases,
+                pat_map,
+                n_slots=n_slots,
+                simulation_days=simulation_days,
+                sim_start=sim_start,
+                window_weekdays=(4, 5),
+            )
+            if fri_sat_bodies and min(fri_sat_bodies) < min(nmin, n_slots):
+                return "night"
         # Body floor for windows = max min_officers from windows (not n_bands heuristic).
         # When off-day coverage is OFF, body floor is hard: OFF officers do not work.
-        if use_windows and fri_sat and window_min > 0:
-            if min(fri_sat) < min(window_min, n_slots):
+        if use_windows and window_day_counts and window_min > 0:
+            if min(window_day_counts) < min(window_min, n_slots):
                 return "window"
         # C3 — pack shape: zero covering bands
         if use_windows and shift_starts and extra_windows:
             if not pack_meets_window_bands(shift_starts, shift_length, extra_windows):
                 return "window"
         # C3 minute-bin occupancy with home+nearby ON-day starts (heavier; only if body OK)
-        if use_windows and shift_starts and extra_windows and phases is not None and pat_map is not None:
+        if (
+            not skip_window_minute
+            and use_windows
+            and shift_starts
+            and extra_windows
+            and phases is not None
+            and pat_map is not None
+        ):
             if _cheap_window_minute_fail(
                 patterns,
                 phases,
@@ -690,8 +1398,14 @@ def _cheap_reject(
                 allow_offday_coverage=allow_offday_coverage,
             ):
                 return "window"
-        if min_ps > 0 and day_counts and min(day_counts) < min_ps:
-            return "gaps"
+        # Body floor only: thin multi-block days may run fewer shifts than pack
+        # size. Equal-spaced full-pack staffing is not a hard daily requirement.
+        # Concurrent floors (24/7 / windows) handle coverage; min_ps is per
+        # *used* start (enforced in full sim), not every pack band every day.
+        if min_ps > 0 and day_counts:
+            floor = min(int(min_ps), int(n_slots))
+            if min(day_counts) < floor:
+                return "gaps"
     return None
 
 
@@ -851,6 +1565,8 @@ def _resolve_axes(
     free_variations,
     rotation_variations,
     rotation_style,
+    annual_hours_target=None,
+    annual_hours_variance=40.0,
 ):
     from logic.rotation_config import get_rotation_config
     from logic.staffing_config import get_staffing_config
@@ -907,12 +1623,62 @@ def _resolve_axes(
             default_starts = [config.SHIFT_TIMES[k][0] for k in sorted(config.SHIFT_TIMES)]
         locked_starts_opts = [default_starts]
 
+    from logic.rotation_patterns import expand_variation_family, generate_multi_block_variation_sets
+
     base_variations = [v for v in (rotation_variations or []) if (v or "").strip()]
     style = (rotation_style or "").strip().lower()
+    # Resolve annual/length for free multi-block math (not a baked 6-2,5-3 catalog)
+    try:
+        _ann = (
+            float(annual_hours_target)
+            if annual_hours_target is not None
+            else float(staffing.get("annual_hours_target") or 0)
+        )
+    except (TypeError, ValueError):
+        _ann = float(staffing.get("annual_hours_target") or 0)
+    try:
+        _len0 = float(length_opts[0]) if length_opts else float(staffing.get("shift_length_hours") or 8)
+    except (TypeError, ValueError, IndexError):
+        _len0 = 8.0
+    try:
+        _avar = float(annual_hours_variance) if annual_hours_variance is not None else 40.0
+    except (TypeError, ValueError):
+        _avar = 40.0
+
     if base_variations:
-        variation_sets: List[List[str]] = [list(base_variations)]
+        # Locked seeds: when free_variations is also exploring style/mix, expand the
+        # same-cycle family (block order + complementary OFF swaps) so officers can
+        # mix — not a single hardcoded pair as "the" rotation.
+        # Pure locked (free_variations off): use exactly the user's set.
+        if free_variations:
+            family = expand_variation_family(base_variations, style=style or None)
+            variation_sets: List[List[str]] = [list(base_variations)]
+            if family and set(family) != set(base_variations):
+                variation_sets.append(family)
+            if len(family) >= 2:
+                for a, b in itertools.combinations(family[:6], 2):
+                    variation_sets.append([a, b])
+            # Dedupe sets
+            dedup = []
+            seen_s = set()
+            for vs in variation_sets:
+                key = tuple(vs)
+                if key not in seen_s:
+                    seen_s.add(key)
+                    dedup.append(vs)
+            variation_sets = dedup
+        else:
+            variation_sets = [list(base_variations)]
     elif free_variations:
-        variation_sets = [list(v) for v in MULTI_BLOCK_CATALOG]
+        # Free: generate families from annual ÷ (365.25 × length) work fraction
+        variation_sets = generate_multi_block_variation_sets(
+            shift_length_hours=_len0,
+            annual_hours_target=_ann if _ann > 0 else float(staffing.get("annual_hours_target") or 2080.0),
+            annual_variance=_avar,
+            max_sets=20,
+        )
+        if not variation_sets:
+            variation_sets = [[]]
     else:
         variation_sets = [[]]
     if base_variations and style not in ("fixed", "rotating"):
@@ -951,6 +1717,520 @@ def _resolve_axes(
     }
 
 
+# Prefer complete scan when post-bind layouts under this; else anytime.
+# Measured: free multi-block free-starts often 50k+ (anytime); locked packs << 1k.
+# 2500 keeps small locked domains exhaustive without forcing mid-size free to thrash.
+EXHAUSTIVE_LAYOUT_THRESHOLD = 2_500
+# Hard-OK often lands <15s on free starts; 90s was thrash on impossible. 60s still roomy.
+ANYTIME_WALL_SEC_DEFAULT = 60.0
+# Exhaustive soft wall: if ≥1 hard-OK and wall hit, stop + mark truncated (honest).
+EXHAUSTIVE_SOFT_WALL_SEC = 25.0
+# After first hard-OK in anytime mode, allow this many more seconds for ranked diversity.
+ANYTIME_AFTER_HARD_SEC = 12.0
+
+# search_depth: wall/pack budgets only (free lengths always full half-hour grid).
+_DEPTH_BUDGETS = {
+    "standard": {
+        "anytime_wall": 45.0,
+        "after_hard": 8.0,
+        "exhaustive_soft": 18.0,
+        "max_cheap_pass": 32,
+        "max_full_per_struct": 16,
+        "max_hard_results": 16,
+    },
+    "deep": {
+        "anytime_wall": 90.0,
+        "after_hard": 20.0,
+        "exhaustive_soft": 40.0,
+        "max_cheap_pass": 64,
+        "max_full_per_struct": 32,
+        "max_hard_results": 32,
+    },
+}
+
+
+def _depth_key(search_depth: str) -> str:
+    d = (search_depth or "standard").strip().lower()
+    if d in ("deep", "thorough", "full"):
+        return "deep"
+    return "standard"
+
+
+def domain_reduction_report(axes: Dict[str, Any]) -> Dict[str, Any]:
+    """Post-bind domain sizes for estimate/UI (no baked scenario text)."""
+    return {
+        "free_dimensions": list(axes.get("free_dims") or []),
+        "raw_counts": dict(axes.get("raw_counts") or {}),
+        "bound_counts": dict(axes.get("bound_counts") or {}),
+        "bind_reasons": list(axes.get("bind_reasons") or []),
+        "officer_counts": list(axes.get("officer_counts") or []),
+        "length_opts": list(axes.get("length_opts") or []),
+        "variation_sets": len(axes.get("variation_sets") or []),
+        "rotation_types": list(axes.get("rotation_types") or []),
+        "min_per_shift_options": list(axes.get("min_per_shift_options") or []),
+        "min_bands_hint": axes.get("min_bands_hint"),
+        "filter_start_packs": bool(axes.get("filter_start_packs")),
+    }
+
+
+def bind_domains(
+    axes: Dict[str, Any],
+    *,
+    coverage_247: int = 0,
+    use_extra_windows: bool = False,
+    extra_windows: Optional[List[Dict]] = None,
+    annual_hours_target: Optional[float] = None,
+    annual_hours_variance: float = 40.0,
+    annual_hours_hard: bool = False,
+    max_consecutive_work_days: int = 0,
+    min_rest_hours: float = 0.0,
+    avoid_flsa: bool = False,
+    flsa_work_period_days: int = 28,
+) -> Dict[str, Any]:
+    """
+    Co-reduce free axes from constraints *together* (CSP domain reduction).
+
+    Sparse Given (e.g. only officer count) leaves other axes wide.
+    Each hard/Given constraint further intersects domains — does not invent
+    24/7/windows/annual filters when those constraints are off.
+    """
+    import copy
+    import math
+
+    from logic.optimizer_features import early_impossible_proof
+    from logic.rotation_patterns import build_pattern, projected_annual_hours
+
+    out = copy.copy(axes)
+    reasons: List[str] = []
+    cov = max(0, int(coverage_247 or 0))
+    wins = list(extra_windows or []) if use_extra_windows else []
+    win_min = _window_body_floor(wins, use_windows=bool(use_extra_windows and wins))
+    max_c = max(0, int(max_consecutive_work_days or 0))
+    min_rest = float(min_rest_hours or 0)
+    style = (out.get("style") or "rotating").strip().lower()
+    try:
+        annual = (
+            float(annual_hours_target)
+            if annual_hours_target is not None
+            else float((out.get("staffing") or {}).get("annual_hours_target") or 2080)
+        )
+    except (TypeError, ValueError):
+        annual = 2080.0
+    try:
+        avar = float(annual_hours_variance) if annual_hours_variance is not None else 40.0
+    except (TypeError, ValueError):
+        avar = 40.0
+
+    raw = {
+        "officer_counts": len(out.get("officer_counts") or []),
+        "length_opts": len(out.get("length_opts") or []),
+        "variation_sets": len(out.get("variation_sets") or []),
+        "rotation_types": len(out.get("rotation_types") or []),
+        "min_per_shift_options": len(out.get("min_per_shift_options") or []),
+    }
+
+    length_opts = [float(x) for x in (out.get("length_opts") or [8.0])]
+    variation_sets: List[List[str]] = [list(vs) for vs in (out.get("variation_sets") or [[]])]
+    base_vars = [v for v in (out.get("base_variations") or []) if (v or "").strip()]
+
+    has_multi = any(bool(vs) and any("," in str(x) for x in (vs or [])) for vs in variation_sets) or any(
+        "," in str(x) for x in base_vars
+    )
+
+    # Fixed style: multi-segment multi-block invalid — keep single-block only
+    if style == "fixed":
+        kept_fixed = []
+        for vs in variation_sets:
+            if not vs:
+                kept_fixed.append(vs)
+                continue
+            if all("," not in str(t) for t in vs):
+                kept_fixed.append(vs)
+        if kept_fixed != variation_sets:
+            reasons.append(f"fixed style: variation sets {len(variation_sets)}→{len(kept_fixed)}")
+            variation_sets = kept_fixed or [[]]
+            out["variation_sets"] = variation_sets
+            has_multi = any(bool(vs) and any("," in str(x) for x in (vs or [])) for vs in variation_sets)
+
+    # Multi-block duty → collapse squad catalog
+    if has_multi and len(out.get("rotation_types") or []) > 1:
+        n_rt = len(out["rotation_types"])
+        out["rotation_types"] = [out["rotation_types"][0]]
+        reasons.append(f"multi-block: rotation types {n_rt}→1")
+
+    def _set_hits_annual(vs: List[str], length: float) -> bool:
+        if not annual_hours_hard:
+            return True
+        if not vs:
+            return True
+        try:
+            pats = [
+                build_pattern(t, style=style if style in ("fixed", "rotating") else None)
+                for t in vs
+                if (t or "").strip()
+            ]
+        except ValueError:
+            return False
+        if not pats:
+            return True
+        hours = [projected_annual_hours(p, length) for p in pats]
+        lo, hi = min(hours), max(hours)
+        band = avar if avar > 0 else abs(annual) * 0.02
+        return (lo - band) <= annual <= (hi + band)
+
+    # Annual hard × length × patterns only when annual hard + patterns exist
+    if annual_hours_hard and (any(vs for vs in variation_sets) or base_vars):
+        proof_sets = [vs for vs in variation_sets if vs] or ([base_vars] if base_vars else [])
+
+        kept_sets = []
+        for vs in variation_sets:
+            if not vs:
+                kept_sets.append(vs)
+                continue
+            if any(_set_hits_annual(vs, L) for L in length_opts):
+                kept_sets.append(vs)
+        if kept_sets and len(kept_sets) < len(variation_sets):
+            reasons.append(f"annual×pattern: variation sets {len(variation_sets)}→{len(kept_sets)}")
+            variation_sets = kept_sets
+        out["variation_sets"] = variation_sets
+
+        kept_L = []
+        for L in length_opts:
+            sets_for_L = [vs for vs in variation_sets if vs] or proof_sets
+            if not sets_for_L:
+                kept_L.append(L)
+                continue
+            if any(_set_hits_annual(vs, L) for vs in sets_for_L):
+                kept_L.append(L)
+        if kept_L and len(kept_L) < len(length_opts):
+            reasons.append(f"annual×length: lengths {len(length_opts)}→{len(kept_L)}")
+            length_opts = kept_L
+        elif not kept_L and length_opts:
+            reasons.append("annual×length: no length hits band (kept for soft/near-miss)")
+        out["length_opts"] = length_opts
+
+    # 24/7 × length: band count must fit under max N
+    n_list = [int(n) for n in (out.get("officer_counts") or [])]
+    max_n = max(n_list) if n_list else 0
+    if cov > 0 and length_opts and max_n > 0:
+        kept_L = []
+        for L in length_opts:
+            bands = int(math.ceil(24.0 / float(L))) if L > 0 else 99
+            if bands <= max_n:
+                kept_L.append(L)
+        if kept_L and len(kept_L) < len(length_opts):
+            reasons.append(f"24/7×length: lengths {len(length_opts)}→{len(kept_L)}")
+            length_opts = kept_L
+            out["length_opts"] = length_opts
+
+    # Officer counts: only cut when other floors active (sparse N alone stays wide)
+    if n_list and (cov > 0 or win_min > 0 or (annual_hours_hard and (has_multi or base_vars))):
+        kept_n = []
+        for n in n_list:
+            ok_any = False
+            for L in length_opts or [8.0]:
+                proof_vars = list(base_vars)
+                if not proof_vars:
+                    for vs in variation_sets:
+                        if vs:
+                            proof_vars = list(vs)
+                            break
+                _rot0 = ""
+                rts = out.get("rotation_types") or []
+                if rts:
+                    _rot0 = str(rts[0])
+                reason = early_impossible_proof(
+                    num_officers=int(n),
+                    shift_length_hours=float(L),
+                    annual_hours_target=float(annual),
+                    annual_hours_variance=float(avar),
+                    annual_hours_hard=bool(annual_hours_hard and (bool(proof_vars) or bool(_rot0))),
+                    rotation_variations=proof_vars or None,
+                    coverage_247=cov,
+                    window_min=win_min,
+                    rotation_style=style or "rotating",
+                    max_consecutive_work_days=max_c,
+                    min_rest_hours=min_rest,
+                    avoid_flsa=bool(avoid_flsa),
+                    flsa_work_period_days=int(flsa_work_period_days or 28),
+                    rotation_type=_rot0,
+                )
+                if reason is None:
+                    ok_any = True
+                    break
+            if ok_any:
+                kept_n.append(n)
+            else:
+                reasons.append(f"N={n}: impossible under co-bound constraints")
+        if kept_n:
+            if len(kept_n) < len(n_list):
+                reasons.append(f"officer counts {len(n_list)}→{len(kept_n)}")
+            out["officer_counts"] = kept_n
+            n_list = kept_n
+
+    # FLSA × length: drop lengths where every offered multi-block always fails §207(k)
+    if avoid_flsa and length_opts and (base_vars or any(variation_sets)):
+        try:
+            from logic.labor_compliance import flsa_threshold_for_period_days
+
+            period = max(7, min(int(flsa_work_period_days or 28), 28))
+            thr = float(flsa_threshold_for_period_days(period))
+            proof_texts: List[str] = list(base_vars)
+            if not proof_texts:
+                for vs in variation_sets:
+                    proof_texts.extend(list(vs or []))
+            pats = []
+            for t in proof_texts:
+                try:
+                    pats.append(
+                        build_pattern(
+                            t,
+                            style=style if style in ("fixed", "rotating") else None,
+                        )
+                    )
+                except ValueError:
+                    continue
+            if pats:
+                kept_L_flsa = []
+                for L in length_opts:
+                    if all(
+                        pattern_flsa_always_fails(
+                            p.duty_vector(),
+                            float(L),
+                            period_days=period,
+                            threshold=thr,
+                        )
+                        for p in pats
+                    ):
+                        continue
+                    kept_L_flsa.append(L)
+                if kept_L_flsa and len(kept_L_flsa) < len(length_opts):
+                    reasons.append(f"FLSA×length: lengths {len(length_opts)}→{len(kept_L_flsa)}")
+                    length_opts = kept_L_flsa
+                    out["length_opts"] = length_opts
+                elif not kept_L_flsa:
+                    reasons.append(f"FLSA: all lengths always exceed {thr:g}h/{period}d for offered patterns")
+        except Exception:
+            pass
+
+    # Max consecutive: drop variation sets where every pattern exceeds cap
+    if max_c > 0 and variation_sets:
+        kept_vs: List[List[str]] = []
+        for vs in variation_sets:
+            if not vs:
+                kept_vs.append(vs)
+                continue
+            ok_pat = False
+            for t in vs:
+                try:
+                    p = build_pattern(
+                        t,
+                        style=style if style in ("fixed", "rotating") else None,
+                    )
+                except ValueError:
+                    continue
+                if _max_on_streak(p.duty_vector(), 0) <= max_c:
+                    ok_pat = True
+                    break
+            if ok_pat:
+                kept_vs.append(vs)
+            else:
+                reasons.append(f"drop variation set (all patterns > max consecutive {max_c}): {vs}")
+        if kept_vs and len(kept_vs) < len(variation_sets):
+            reasons.append(f"max consecutive: variation sets {len(variation_sets)}→{len(kept_vs)}")
+            variation_sets = kept_vs
+            out["variation_sets"] = variation_sets
+        elif not kept_vs and variation_sets:
+            # Leave one set so caller can surface early-impossible near-miss
+            reasons.append(f"max consecutive {max_c}: no viable multi-block set")
+
+    # Min rest × locked start packs: drop packs that cannot rest between adjacent ON
+    locked_starts = out.get("locked_starts_opts")
+    if min_rest > 0 and locked_starts is not None and length_opts:
+        has_adj = False
+        for vs in variation_sets:
+            for t in vs or []:
+                try:
+                    p = build_pattern(
+                        t,
+                        style=style if style in ("fixed", "rotating") else None,
+                    )
+                except ValueError:
+                    continue
+                if pattern_has_adjacent_on(p.duty_vector(), 0):
+                    has_adj = True
+                    break
+            if has_adj:
+                break
+        if has_adj:
+            kept_packs = []
+            for pack in locked_starts:
+                ok_L = False
+                for L in length_opts:
+                    mx = max_rest_minutes_for_pack(
+                        list(pack),
+                        float(L),
+                        day_gap_days=1,
+                        nearby_hops=1,
+                    )
+                    if mx >= min_rest * 60.0 - 1.0:
+                        ok_L = True
+                        break
+                if ok_L:
+                    kept_packs.append(list(pack))
+            if kept_packs and len(kept_packs) < len(locked_starts):
+                reasons.append(f"min rest×packs: locked packs {len(locked_starts)}→{len(kept_packs)}")
+                out["locked_starts_opts"] = kept_packs
+            elif not kept_packs:
+                reasons.append("min rest: no locked pack meets rest with adjacent ON patterns")
+
+    # min_per_shift vs headcount
+    mps_opts = [max(1, int(x)) for x in (out.get("min_per_shift_options") or [1])]
+    if n_list and len(mps_opts) > 1:
+        max_n = max(n_list)
+        kept_m = [m for m in mps_opts if m <= max_n]
+        if kept_m and len(kept_m) < len(mps_opts):
+            reasons.append(f"min_per_shift×N: options {len(mps_opts)}→{len(kept_m)}")
+            out["min_per_shift_options"] = kept_m
+
+    # Free-start pack filter when coverage OR rest binds multi-block adjacent ON
+    rest_binds_packs = bool(min_rest > 0)
+    filter_packs = bool(cov > 0 or (use_extra_windows and wins) or rest_binds_packs)
+    out["filter_start_packs"] = filter_packs
+    out["bind_min_rest_hours"] = min_rest
+    out["bind_max_consecutive"] = max_c
+    out["bind_avoid_flsa"] = bool(avoid_flsa)
+    out["bind_flsa_period_days"] = int(flsa_work_period_days or 28)
+
+    min_b_hint = 2
+    if cov > 0 and length_opts:
+        min_b_hint = max(min_b_hint, max(int(math.ceil(24.0 / float(L))) for L in length_opts))
+    out["min_bands_hint"] = min_b_hint
+    out["bind_windows"] = wins
+    out["bind_coverage_247"] = cov
+    out["bind_annual_hard"] = bool(annual_hours_hard)
+    out["bind_reasons"] = reasons
+    out["raw_counts"] = raw
+    out["bound_counts"] = {
+        "officer_counts": len(out.get("officer_counts") or []),
+        "length_opts": len(out.get("length_opts") or []),
+        "variation_sets": len(out.get("variation_sets") or []),
+        "rotation_types": len(out.get("rotation_types") or []),
+        "min_per_shift_options": len(out.get("min_per_shift_options") or []),
+    }
+    free_dims = list(out.get("free_dims") or [])
+    if len(out.get("officer_counts") or []) <= 1 and "officer_count" in free_dims:
+        free_dims = [d for d in free_dims if d != "officer_count"]
+    if len(out.get("length_opts") or []) <= 1 and "shift_length" in free_dims:
+        free_dims = [d for d in free_dims if d != "shift_length"]
+    if len(out.get("rotation_types") or []) <= 1 and "rotation" in free_dims:
+        free_dims = [d for d in free_dims if d != "rotation"]
+    if len(out.get("variation_sets") or []) <= 1 and "rotation_variations" in free_dims:
+        free_dims = [d for d in free_dims if d != "rotation_variations"]
+    if len(out.get("min_per_shift_options") or []) <= 1 and "min_per_shift" in free_dims:
+        free_dims = [d for d in free_dims if d != "min_per_shift"]
+    if out.get("locked_starts_opts") is not None and "shift_starts" in free_dims:
+        free_dims = [d for d in free_dims if d != "shift_starts"]
+    out["free_dims"] = free_dims
+    return out
+
+
+def neighbor_start_packs(starts: Sequence[str], *, max_neighbors: int = 12) -> List[List[str]]:
+    """±30 minute nudge on one band (after first hard-OK)."""
+    base = [_snap_to_half_hour(s) for s in starts if s]
+    if len(base) < 2:
+        return []
+    out: List[List[str]] = []
+    seen = {tuple(sorted(base))}
+    for i, s in enumerate(base):
+        try:
+            parts = s.split(":")
+            total = int(parts[0]) * 60 + int(parts[1] if len(parts) > 1 else 0)
+        except (ValueError, IndexError):
+            continue
+        for delta in (-30, 30):
+            nt = (total + delta) % (24 * 60)
+            cand = list(base)
+            cand[i] = _format_hhmm(nt // 60, nt % 60)
+            uniq: List[str] = []
+            for x in cand:
+                if x not in uniq:
+                    uniq.append(x)
+            if len(uniq) < 2:
+                continue
+            key = tuple(sorted(uniq))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(uniq)
+            if len(out) >= max_neighbors:
+                return out
+    return out
+
+
+def try_cpsat_phase_seed(
+    *,
+    n_officers: int,
+    cycle_length: int,
+    n_patterns: int = 1,
+    duty_rings: Optional[List[List[bool]]] = None,
+    pattern_map: Optional[List[int]] = None,
+    min_daily_on: int = 0,
+    window_weekday_floors: Optional[List[Tuple[int, int]]] = None,
+    sim_start_weekday: int = 0,
+    free_pattern_map: bool = True,
+) -> Optional[List[int]]:
+    """Optional CP-SAT joint phase seed (phases only). Full sim remains truth."""
+    joint = try_cpsat_joint_seed(
+        n_officers=n_officers,
+        cycle_length=cycle_length,
+        n_patterns=n_patterns,
+        duty_rings=duty_rings,
+        pattern_map=pattern_map,
+        min_daily_on=min_daily_on,
+        window_weekday_floors=window_weekday_floors,
+        sim_start_weekday=sim_start_weekday,
+        free_pattern_map=free_pattern_map,
+    )
+    return joint[0] if joint else None
+
+
+def try_cpsat_joint_seed(
+    *,
+    n_officers: int,
+    cycle_length: int,
+    n_patterns: int = 1,
+    duty_rings: Optional[List[List[bool]]] = None,
+    pattern_map: Optional[List[int]] = None,
+    min_daily_on: int = 0,
+    window_weekday_floors: Optional[List[Tuple[int, int]]] = None,
+    sim_start_weekday: int = 0,
+    free_pattern_map: bool = True,
+) -> Optional[Tuple[List[int], List[int]]]:
+    """CP-SAT (phases, pattern_map) seed. Full sim remains truth."""
+    try:
+        from logic.staffing_cpsat import suggest_joint_seed
+
+        return suggest_joint_seed(
+            n_officers=n_officers,
+            cycle_length=cycle_length,
+            duty_rings=duty_rings,
+            pattern_map=pattern_map,
+            min_daily_on=int(min_daily_on or 0),
+            window_weekday_floors=window_weekday_floors,
+            sim_start_weekday=int(sim_start_weekday or 0),
+            free_pattern_map=bool(free_pattern_map),
+        )
+    except Exception:
+        if n_officers < 1 or cycle_length < 1:
+            return None
+        step = max(1, cycle_length // max(1, n_officers))
+        phases = [(i * step) % cycle_length for i in range(int(n_officers))]
+        n_pat = max(1, int(n_patterns))
+        pmap = list(pattern_map) if pattern_map is not None else [i % n_pat for i in range(int(n_officers))]
+        return phases, pmap[: int(n_officers)]
+
+
 def estimate_search_space(
     *,
     rotation_types: Optional[List[str]] = None,
@@ -973,6 +2253,10 @@ def estimate_search_space(
     coverage_247: int = 0,
     use_extra_windows: bool = False,
     extra_windows: Optional[List[Dict]] = None,
+    max_consecutive_work_days: int = 0,
+    min_rest_hours: float = 0.0,
+    avoid_flsa_overtime: bool = False,
+    flsa_work_period_days: int = 28,
     **_ignored,
 ) -> Dict:
     """
@@ -996,6 +2280,21 @@ def estimate_search_space(
         free_variations=free_variations,
         rotation_variations=rotation_variations,
         rotation_style=rotation_style,
+        annual_hours_target=annual_hours_target,
+        annual_hours_variance=annual_hours_variance,
+    )
+    axes = bind_domains(
+        axes,
+        coverage_247=int(coverage_247 or 0),
+        use_extra_windows=bool(use_extra_windows),
+        extra_windows=extra_windows,
+        annual_hours_target=annual_hours_target,
+        annual_hours_variance=annual_hours_variance,
+        annual_hours_hard=bool(annual_hours_hard),
+        max_consecutive_work_days=int(max_consecutive_work_days or 0),
+        min_rest_hours=float(min_rest_hours or 0),
+        avoid_flsa=bool(avoid_flsa_overtime),
+        flsa_work_period_days=int(flsa_work_period_days or 28),
     )
 
     # Multiplicative estimate (avoid nested full enumeration when free dims explode)
@@ -1030,12 +2329,28 @@ def estimate_search_space(
 
     # Cache generate_start_packs length by shift length to avoid re-running the
     # combinatorial generator for every (n_off, length) pair in the estimate loop.
-    _pack_len_cache: Dict[Tuple[float, int, int], int] = {}
+    _pack_len_cache: Dict[Tuple[float, int, int, int, int], int] = {}
+    _est_wins = list(extra_windows or []) if use_extra_windows else []
+    _est_cov = int(coverage_247 or 0)
 
-    def _pack_count(L: float, min_b: int, max_b: int) -> int:
-        key = (L, min_b, max_b)
+    def _pack_count(L: float, min_b: int, max_b: int, n_off: int = 8) -> int:
+        filt = bool(_est_cov > 0 or _est_wins)
+        key = (L, min_b, max_b, _est_cov, 1 if _est_wins else 0, int(filt))
         if key not in _pack_len_cache:
-            _pack_len_cache[key] = len(generate_start_packs(float(L), min_bands=min_b, max_bands=max_b))
+            # Cap matches practical free-starts depth (not C(n,k)×1000 fiction)
+            mp = FREE_STARTS_MAX_PACKS if filt else min(1000, FREE_STARTS_MAX_PACKS * 4)
+            _pack_len_cache[key] = len(
+                generate_start_packs(
+                    float(L),
+                    num_officers=int(n_off),
+                    min_bands=min_b,
+                    max_bands=max_b,
+                    max_packs=mp,
+                    extra_windows=_est_wins or None,
+                    coverage_247=_est_cov,
+                    filter_infeasible=filt,
+                )
+            )
         return _pack_len_cache[key]
 
     n_rot_valid = 0
@@ -1070,6 +2385,10 @@ def estimate_search_space(
                         max_b = min_b
                     if annual_hours_hard or coverage_247 > 0 or use_extra_windows:
                         win_min = _window_body_floor(extra_windows, use_windows=use_extra_windows)
+                        _est_rot = ""
+                        _rts = axes.get("rotation_types") or []
+                        if _rts:
+                            _est_rot = str(_rts[0])
                         reason = early_impossible_proof(
                             num_officers=int(n_off),
                             shift_length_hours=float(length),
@@ -1080,6 +2399,7 @@ def estimate_search_space(
                             coverage_247=int(coverage_247 or 0),
                             window_min=win_min,
                             rotation_style=axes["style"],
+                            rotation_type=_est_rot,
                         )
                         if reason:
                             continue
@@ -1087,7 +2407,7 @@ def estimate_search_space(
                     if axes["locked_starts_opts"] is not None:
                         n_starts = len(axes["locked_starts_opts"])
                     else:
-                        n_starts = _pack_count(float(length), min_b, max_b)
+                        n_starts = _pack_count(float(length), min_b, max_b, int(n_off))
                     for _min_ps in axes["min_per_shift_options"]:
                         outer += n_starts
                         total += n_starts * inner
@@ -1116,6 +2436,13 @@ def estimate_search_space(
             return f"~{sec / 60:.0f}–{sec * 2.5 / 60:.0f} minutes"
         return f"~{sec / 3600:.1f}–{sec * 2.5 / 3600:.1f} hours"
 
+    bind_note = ""
+    bind_reasons = list(axes.get("bind_reasons") or [])
+    if bind_reasons:
+        bind_note = " Bound: " + "; ".join(bind_reasons[:4])
+        if len(bind_reasons) > 4:
+            bind_note += f" (+{len(bind_reasons) - 4} more)"
+
     warning = ""
     if risk in ("high", "extreme"):
         locks_needed = [d for d in ("officer_count", "shift_starts", "shift_length") if d in axes["free_dims"]]
@@ -1129,13 +2456,15 @@ def estimate_search_space(
             f"about {total:,} layouts must be checked. "
             f"Expected time {_fmt_time(est_sec)}. "
             f"{suggestion}"
+            f"{bind_note}"
         )
     elif risk == "medium":
         warning = (
-            f"Search space ≈ {total:,} layouts ({_fmt_time(est_sec)}). Locking more requirements will shrink this."
+            f"Search space ≈ {total:,} layouts ({_fmt_time(est_sec)}). "
+            f"Locking more requirements will shrink this.{bind_note}"
         )
     else:
-        warning = f"Search space ≈ {total:,} layouts ({_fmt_time(est_sec)})."
+        warning = f"Search space ≈ {total:,} layouts ({_fmt_time(est_sec)}).{bind_note}"
 
     return {
         "success": True,
@@ -1154,6 +2483,10 @@ def estimate_search_space(
         "rotation_types": axes["rotation_types"],
         "constraint_labels": dict(CONSTRAINT_LABELS),
         "default_weights": dict(DEFAULT_CONSTRAINT_WEIGHTS),
+        "bind_reasons": bind_reasons,
+        "raw_counts": dict(axes.get("raw_counts") or {}),
+        "bound_counts": dict(axes.get("bound_counts") or {}),
+        "domain_report": domain_reduction_report(axes),
     }
 
 
@@ -1181,9 +2514,9 @@ def optimize_staffing_scenarios(
     stagger_phases: bool = True,
     shift_starts_options: Optional[List[List[str]]] = None,
     shift_length_options: Optional[List[float]] = None,
-    max_total_evals: Optional[int] = None,  # ignored — no artificial cap
-    search_depth: str = "normal",  # ignored — exhaustive
-    max_inner_trials: Optional[int] = None,  # ignored — exhaustive model
+    max_total_evals: Optional[int] = None,  # ignored — no artificial eval cap
+    search_depth: str = "standard",  # standard=faster walls · deep=thorough walls
+    max_inner_trials: Optional[int] = None,  # ignored
     free_officer_counts: bool = False,
     free_starts: bool = False,
     free_lengths: bool = False,
@@ -1198,10 +2531,14 @@ def optimize_staffing_scenarios(
     cancel_check=None,
 ) -> Dict:
     """
-    Exhaustive sweep of the constraint-defined space (outer × phase × pattern).
+    Sweep of the constraint-defined space (outer × phase × pattern).
 
-    max_total_evals / search_depth / max_inner_trials are accepted for API
-    compatibility but do not truncate the search.
+    search_depth: "standard" (faster anytime/pack budgets) or "deep" (thorough).
+    Free shift lengths stay the full half-hour grid when free (depth does not
+    drop lengths — that false-greened viable options). Depth only changes
+    wall-clock / pack / diversity budgets.
+
+    max_total_evals / max_inner_trials accepted for API compat (ignored).
 
     nearby_start_hops — work-day start "bumps" from home (± pack bands).
     allow_offday_coverage — only when user opts in; default respects rotation OFF.
@@ -1213,7 +2550,9 @@ def optimize_staffing_scenarios(
     from logic.rotation_patterns import build_pattern
     from simulator import SimulatorConfig, simulate_schedule
 
-    del max_total_evals, search_depth, max_inner_trials  # no caps
+    del max_total_evals, max_inner_trials  # no hard eval caps
+    _depth = _depth_key(search_depth)
+    _bud = dict(_DEPTH_BUDGETS[_depth])
 
     nearby_hops = max(0, int(nearby_start_hops if nearby_start_hops is not None else 1))
     offday_ok = bool(allow_offday_coverage)
@@ -1257,6 +2596,12 @@ def optimize_staffing_scenarios(
         free_lengths=free_lengths,
         free_variations=free_variations,
         stagger_phases=stagger_phases,
+        annual_hours_hard=bool(annual_hours_hard),
+        annual_hours_target=annual_hours_target,
+        annual_hours_variance=float(annual_hours_variance if annual_hours_variance is not None else 40.0),
+        coverage_247=int(coverage_247 or 0),
+        use_extra_windows=bool(use_extra_windows),
+        extra_windows=extra_windows,
     )
 
     axes = _resolve_axes(
@@ -1273,6 +2618,8 @@ def optimize_staffing_scenarios(
         free_variations=free_variations,
         rotation_variations=rotation_variations,
         rotation_style=rotation_style,
+        annual_hours_target=annual_hours_target,
+        annual_hours_variance=annual_hours_variance,
     )
 
     staffing = axes["staffing"]
@@ -1284,6 +2631,20 @@ def optimize_staffing_scenarios(
     night_min = int(night_minimum) if night_minimum is not None else int(config.NIGHT_MINIMUM_OFFICERS)
     windows = list(extra_windows or [])
     cov247 = max(0, int(coverage_247 or 0))
+    # L0–L2: shrink axes using constraints together (before any layout enum)
+    axes = bind_domains(
+        axes,
+        coverage_247=cov247,
+        use_extra_windows=bool(use_extra_windows),
+        extra_windows=windows,
+        annual_hours_target=annual,
+        annual_hours_variance=annual_hours_variance,
+        annual_hours_hard=bool(annual_hours_hard),
+        max_consecutive_work_days=int(max_consecutive_work_days or 0),
+        min_rest_hours=float(min_rest_hours or 0),
+        avoid_flsa=bool(avoid_flsa_overtime),
+        flsa_work_period_days=int(flsa_work_period_days or 28),
+    )
     style = axes["style"]
     sim_start = date.today()
     if sim_start_date:
@@ -1305,6 +2666,10 @@ def optimize_staffing_scenarios(
     early_reasons: List[str] = []
     length0 = float(axes["length_opts"][0]) if axes["length_opts"] else float(shift_length_hours or 8)
     for n_try in axes["officer_counts"]:
+        _rot_try = ""
+        _rts_try = axes.get("rotation_types") or []
+        if _rts_try:
+            _rot_try = str(_rts_try[0])
         reason = early_impossible_proof(
             num_officers=int(n_try),
             shift_length_hours=length0,
@@ -1315,6 +2680,11 @@ def optimize_staffing_scenarios(
             coverage_247=cov247,
             window_min=window_min,
             rotation_style=style or "rotating",
+            max_consecutive_work_days=int(max_consecutive_work_days or 0),
+            min_rest_hours=float(min_rest_hours or 0),
+            avoid_flsa=bool(avoid_flsa_overtime),
+            flsa_work_period_days=int(flsa_work_period_days or 28),
+            rotation_type=_rot_try,
         )
         if reason:
             early_reasons.append(f"N={n_try}: {reason}")
@@ -1442,13 +2812,85 @@ def optimize_staffing_scenarios(
 
     ordered_n = sorted(axes["officer_counts"])
     space_total = int(space.get("total_layouts") or 0)
+    # Anytime when bound space is large; complete scan preferred under threshold.
+    prefer_exhaustive = space_total <= EXHAUSTIVE_LAYOUT_THRESHOLD
+    anytime_wall = float(_bud["anytime_wall"])
+    exhaustive_soft_wall = float(_bud["exhaustive_soft"])
+    after_hard_sec = float(_bud["after_hard"])
+    budget_exhausted = False
+    search_truncated = False
+    _first_hard_t: Optional[float] = None
+    max_hard_results_run = int(_bud["max_hard_results"])
+    if prefer_exhaustive:
+        max_hard_results_run = max(max_hard_results_run, 32 if _depth == "deep" else 24)
     _progress(
         phase="start",
         done=0,
         total=space_total,
         full_sims=0,
-        message=f"Starting exhaustive search ({space_total:,} layouts)…",
+        message=(
+            f"Starting {'exhaustive' if prefer_exhaustive else 'anytime'} search "
+            f"({space_total:,} bound layouts, depth={_depth})…"
+        ),
     )
+
+    # Global body cache: (pattern texts, N, phases, pat_map) → day counts — across packs
+    _global_body_cache: Dict[
+        Tuple[Tuple[str, ...], int, Tuple[int, ...], Tuple[int, ...]],
+        Tuple[List[int], List[int]],
+    ] = {}
+    # Pack catalog cache: avoid re-running generate_start_packs for same (L,N,bands,filters)
+    _pack_gen_cache: Dict[Tuple[Any, ...], List[List[str]]] = {}
+    # CP-SAT joint seed cache: (N, cycle, duty rings, floors) → seed
+    _joint_seed_cache: Dict[Tuple[Any, ...], Optional[Tuple[List[int], List[int]]]] = {}
+    # FLSA threshold once per run (not per cheap node)
+    try:
+        from logic.labor_compliance import flsa_threshold_for_period_days as _flsa_fn_once
+
+        _flsa_thr_run = float(_flsa_fn_once(int(flsa_work_period_days or 28)))
+    except Exception:
+        try:
+            _flsa_thr_run = float(getattr(config, "FLSA_207K_HOURS_THRESHOLD", 171.0))
+        except Exception:
+            _flsa_thr_run = 171.0
+    _win_wds_run = _window_weekdays_from_extra(windows if use_extra_windows else None)
+    # Defer heavy minute-bin to top candidates when windows bind (body floor still always run)
+    _defer_win_minute = bool(use_extra_windows and windows)
+
+    def _enough_hard() -> bool:
+        return bool(require_hard_ok and len(results) >= max_hard_results_run)
+
+    def _note_hard_found() -> None:
+        nonlocal _first_hard_t, search_truncated
+        if results and _first_hard_t is None:
+            _first_hard_t = time.perf_counter()
+        if _enough_hard():
+            search_truncated = True
+
+    def _budget_hit() -> bool:
+        nonlocal budget_exhausted, search_truncated
+        if cancelled:
+            return True
+        if _enough_hard():
+            search_truncated = True
+            return True
+        elapsed = time.perf_counter() - t0
+        if prefer_exhaustive:
+            # Soft wall: complete scan preferred, but don't thrash after hard-OK
+            if results and elapsed >= exhaustive_soft_wall:
+                search_truncated = True
+                return True
+            return False
+        if elapsed >= anytime_wall:
+            budget_exhausted = True
+            search_truncated = True
+            return True
+        # After first hard-OK, only spend a short diversity window
+        if _first_hard_t is not None and len(results) >= 4:
+            if (time.perf_counter() - _first_hard_t) >= after_hard_sec:
+                search_truncated = True
+                return True
+        return False
 
     def _record_fail(m: Optional[Dict]) -> None:
         if not m:
@@ -1524,55 +2966,179 @@ def optimize_staffing_scenarios(
             ],
         }
 
-    for rotation in axes["rotation_types"]:
-        for variations in axes["variation_sets"]:
-            if rotation not in ROTATION_PRESETS and not variations:
-                continue
-            rot_key = rotation if rotation in ROTATION_PRESETS else next(iter(ROTATION_PRESETS.keys()))
-            use_style = style
-            if variations and use_style not in ("fixed", "rotating"):
-                use_style = "rotating" if any("," in v for v in variations) else "fixed"
+    # Fail-first outer order: length → N → variations → rotation → min_ps → packs
+    for length in axes["length_opts"]:
+        if _budget_hit() or _cancelled():
+            break
+        for n_off in ordered_n:
+            if _budget_hit() or _cancelled():
+                break
+            # Max distinct start bands ≈ roster size
+            max_b = min(6, max(2, int(n_off)))
+            for variations in axes["variation_sets"]:
+                if _budget_hit() or _cancelled():
+                    break
+                for rotation in axes["rotation_types"]:
+                    if _budget_hit() or _cancelled():
+                        break
+                    if rotation not in ROTATION_PRESETS and not variations:
+                        continue
+                    rot_key = rotation if rotation in ROTATION_PRESETS else next(iter(ROTATION_PRESETS.keys()))
+                    use_style = style
+                    if variations and use_style not in ("fixed", "rotating"):
+                        use_style = "rotating" if any("," in v for v in variations) else "fixed"
 
-            parsed_patterns = []
-            cycle_len = 14
-            if variations:
-                try:
-                    for t in variations:
-                        parsed_patterns.append(
-                            build_pattern(
-                                t,
-                                style=use_style if use_style in ("fixed", "rotating") else None,
-                            )
+                    parsed_patterns = []
+                    cycle_len = 14
+                    if variations:
+                        try:
+                            for t in variations:
+                                parsed_patterns.append(
+                                    build_pattern(
+                                        t,
+                                        style=use_style if use_style in ("fixed", "rotating") else None,
+                                    )
+                                )
+                            cycle_len = parsed_patterns[0].cycle_length
+                        except ValueError:
+                            continue
+
+                    # CP-SAT joint phase+pattern seed (window-aware). Full sim still truth.
+                    # Skip when domain already tiny (seed cost > benefit) or cache hit.
+                    _phase_seed = None
+                    _pat_map_seed = None
+                    _joint_min_bodies = 0
+                    if parsed_patterns and stagger_phases and int(n_off) <= 12:
+                        import math as _math_seed
+
+                        from logic.staffing_cpsat import phase_quality, windows_to_weekday_floors
+
+                        _duty_rings = [list(p.duty_vector()) for p in parsed_patterns]
+                        _body_floor = 0
+                        if cov247 > 0 and float(length) > 0:
+                            _bands = max(1, _math_seed.ceil(24.0 / float(length)))
+                            _body_floor = int(_bands) * int(cov247)
+                        _win_floors = windows_to_weekday_floors(windows) if use_extra_windows and windows else None
+                        _jkey = (
+                            int(n_off),
+                            int(cycle_len),
+                            tuple(tuple(r) for r in _duty_rings),
+                            int(_body_floor),
+                            tuple(_win_floors) if _win_floors else None,
+                            int(sim_start.weekday()),
                         )
-                    cycle_len = parsed_patterns[0].cycle_length
-                except ValueError:
-                    continue
+                        if _jkey in _joint_seed_cache:
+                            _joint = _joint_seed_cache[_jkey]
+                        else:
+                            # Skip joint solver when bound space is already small
+                            if space_total > 0 and space_total < 200:
+                                _joint = None
+                            else:
+                                _joint = try_cpsat_joint_seed(
+                                    n_officers=int(n_off),
+                                    cycle_length=int(cycle_len),
+                                    n_patterns=len(parsed_patterns),
+                                    duty_rings=_duty_rings,
+                                    min_daily_on=_body_floor,
+                                    window_weekday_floors=_win_floors,
+                                    sim_start_weekday=int(sim_start.weekday()),
+                                    free_pattern_map=True,
+                                )
+                            _joint_seed_cache[_jkey] = _joint
+                        if _joint is not None:
+                            _phase_seed, _pat_map_seed = _joint
+                            _mn, _, _mw = phase_quality(
+                                _phase_seed,
+                                _duty_rings,
+                                pattern_map=_pat_map_seed,
+                                sim_start_weekday=int(sim_start.weekday()),
+                                window_weekday_floors=_win_floors,
+                            )
+                            _joint_min_bodies = int(_mn)
 
-            for n_off in ordered_n:
-                # Max distinct start bands ≈ roster size (not work_frac×N — that under-capped packs).
-                max_b = min(6, max(2, int(n_off)))
-                for min_ps in axes["min_per_shift_options"]:
-                    for length in axes["length_opts"]:
+                    for min_ps in axes["min_per_shift_options"]:
+                        if _budget_hit() or _cancelled():
+                            break
+                        import math
+
                         min_b = 2
                         if cov247 > 0:
-                            import math
-
                             min_b = max(min_b, math.ceil(24.0 / float(length)))
                         if min_b > max_b:
                             max_b = min_b
 
                         if axes["locked_starts_opts"] is not None:
-                            starts_opts = axes["locked_starts_opts"]
+                            starts_opts = [list(s) for s in axes["locked_starts_opts"]]
                         else:
-                            starts_opts = generate_start_packs(
-                                float(length),
-                                num_officers=int(n_off),
-                                min_bands=min_b,
-                                max_bands=max_b,
+                            _filt = bool(
+                                axes.get("filter_start_packs")
+                                or (
+                                    require_hard_ok
+                                    and (
+                                        cov247 > 0 or (use_extra_windows and windows) or float(min_rest_hours or 0) > 0
+                                    )
+                                )
                             )
+                            _pack_max = FREE_STARTS_MAX_PACKS if _filt else min(1000, FREE_STARTS_MAX_PACKS * 4)
+                            _pack_key = (
+                                float(length),
+                                int(n_off),
+                                max(min_b, int(axes.get("min_bands_hint") or 2)),
+                                int(max_b),
+                                int(_pack_max),
+                                int(cov247),
+                                bool(_filt),
+                                float(min_rest_hours or 0),
+                                int(nearby_hops or 0),
+                                tuple(
+                                    (
+                                        str(w.get("start_time") or w.get("start") or ""),
+                                        str(w.get("end_time") or w.get("end") or ""),
+                                        int(w.get("min_officers") or 0),
+                                        str(w.get("weekday", w.get("weekdays", ""))),
+                                    )
+                                    for w in (windows if use_extra_windows and windows else [])
+                                ),
+                            )
+                            if _pack_key in _pack_gen_cache:
+                                starts_opts = [list(p) for p in _pack_gen_cache[_pack_key]]
+                            else:
+                                starts_opts = generate_start_packs(
+                                    float(length),
+                                    num_officers=int(n_off),
+                                    min_bands=max(min_b, int(axes.get("min_bands_hint") or 2)),
+                                    max_bands=max_b,
+                                    max_packs=_pack_max,
+                                    extra_windows=windows if use_extra_windows else None,
+                                    coverage_247=cov247,
+                                    filter_infeasible=_filt,
+                                    min_rest_hours=float(min_rest_hours or 0),
+                                    nearby_hops=int(nearby_hops or 0),
+                                )
+                                _pack_gen_cache[_pack_key] = [list(p) for p in starts_opts]
+                            # Start-band CP-SAT seed: re-rank packs by body-feasible coverage
+                            # Skip when pack list already tiny (rank cost > benefit)
+                            if (
+                                starts_opts
+                                and len(starts_opts) > 4
+                                and (cov247 > 0 or (use_extra_windows and windows) or _joint_min_bodies > 0)
+                            ):
+                                try:
+                                    from logic.staffing_cpsat import rank_start_packs_seed
 
-                        # _starts_priority defined here (not inside loop) to avoid
-                        # unnecessary per-iteration closure allocation.
+                                    _bodies = max(int(_joint_min_bodies or 0), 1)
+                                    starts_opts = rank_start_packs_seed(
+                                        starts_opts,
+                                        shift_length_hours=float(length),
+                                        n_bodies=_bodies,
+                                        coverage_247=int(cov247),
+                                        extra_windows=windows if use_extra_windows else None,
+                                        min_per_shift=int(min_ps or 0),
+                                        max_keep=len(starts_opts),
+                                    )
+                                except Exception:
+                                    pass
+
                         def _starts_priority(st: Sequence[str]) -> Tuple[int, int, int, str]:
                             hours = []
                             for s in st:
@@ -1600,26 +3166,34 @@ def optimize_staffing_scenarios(
 
                         if axes["locked_starts_opts"] is None and len(starts_opts) > 1:
                             starts_opts = sorted(starts_opts, key=_starts_priority)
-                            # Free-starts can emit max_packs (1000). Hard mode only needs
-                            # priority-sorted head — full 1k×phase grid is multi-hour hang.
-                            if require_hard_ok and len(starts_opts) > 48:
-                                starts_opts = starts_opts[:48]
+                            pack_cap = 48 if require_hard_ok else FREE_STARTS_MAX_PACKS
+                            if prefer_exhaustive:
+                                pack_cap = max(pack_cap, min(len(starts_opts), FREE_STARTS_MAX_PACKS))
+                            if len(starts_opts) > pack_cap:
+                                starts_opts = starts_opts[:pack_cap]
+                                search_truncated = True
 
-                        # Explore multiple start packs (diverse options), not one pack only.
-                        max_hard_results = 24
-                        max_unique_start_packs = 8
-                        exhaustive_packs_left = 2  # phase×pattern grid only for a few misses
+                        # Explore packs; anytime caps unless space small enough for exhaustive
+                        max_hard_results = max_hard_results_run
+                        max_unique_start_packs = 8 if not prefer_exhaustive else max(8, min(32, len(starts_opts)))
+                        exhaustive_packs_left = 2 if not prefer_exhaustive else max(2, min(8, len(starts_opts)))
 
                         def _unique_packs() -> int:
                             return len(
                                 {tuple(r.get("shift_starts") or []) for r in results if r.get("hard_constraints_ok")}
                             )
 
+                        _seen_pack_keys = {tuple(sorted(s)) for s in starts_opts}
+
                         for starts in starts_opts:
+                            if _budget_hit() or _cancelled():
+                                break
                             if require_hard_ok and (
                                 len(results) >= max_hard_results or _unique_packs() >= max_unique_start_packs
                             ):
+                                search_truncated = True
                                 break
+                            _seen_pack_keys.add(tuple(sorted(starts)))
                             # C3 pack-level prune: only when zero bands cover a window
                             # sample (stacking officers cannot help). need>N still full-sims
                             # so soft mode can rank near-misses.
@@ -1735,43 +3309,61 @@ def optimize_staffing_scenarios(
                                     max_consecutive_work_days=int(max_consecutive_work_days),
                                 ):
                                     results.append(row)
+                                    _note_hard_found()
                                     hard_ok_this_pack = True
-                                    # Keep scanning more packs/phases for alternate options
+                                    # Neighborhood ±30m only when starts are free (locked packs stay locked)
+                                    if axes["locked_starts_opts"] is None:
+                                        for nb in neighbor_start_packs(starts):
+                                            nk = tuple(sorted(nb))
+                                            if nk not in _seen_pack_keys:
+                                                _seen_pack_keys.add(nk)
+                                                starts_opts.append(nb)
                                     if len(results) >= max_hard_results:
                                         break
                                     continue
                                 rejected_hard += 1
                                 _record_fail(m)
-                                # keep as near-miss seed
                                 near_misses.append(row)
 
                             if require_hard_ok and len(results) >= max_hard_results:
+                                search_truncated = True
                                 continue
-                            # Fast path hard-OK this pack, already have hard results, or
-                            # exhaustive budget spent → skip phase×pattern cheap grid.
-                            if require_hard_ok and (hard_ok_this_pack or results or exhaustive_packs_left <= 0):
+                            # Fast path hard-OK this pack → skip heavy phase×map grid.
+                            # Full sim remains truth for that hit; other packs still searched.
+                            if require_hard_ok and hard_ok_this_pack:
                                 continue
-                            if require_hard_ok:
+                            if require_hard_ok and results and exhaustive_packs_left <= 0 and not prefer_exhaustive:
+                                search_truncated = True
+                                continue
+                            if require_hard_ok and not hard_ok_this_pack:
                                 exhaustive_packs_left -= 1
 
-                            # Exhaustive cheap scan of entire phase×pattern model (no eval cap).
-                            # Full-sim: all cheap-pass in best-first order until hard-OK, then
-                            # more survivors for ranked alternatives (rank pool). Cheap failures:
-                            # only top few for near-miss metrics.
                             _cheap_penalty = {
                                 "coverage_247": 50_000,
                                 "window": 40_000,
                                 "gaps": 30_000,
                                 "annual": 20_000,
+                                "rest": 45_000,
+                                "consecutive": 42_000,
+                                "flsa": 35_000,
+                                "night": 38_000,
                             }
-                            # C2 — cache body counts across start packs for same N/patterns
-                            _body_cache: Dict[
-                                Tuple[Tuple[int, ...], Tuple[int, ...]],
-                                Tuple[List[int], List[int]],
-                            ] = {}
+                            # Prefer CP-SAT joint phase + pattern-map seeds first
+                            if _phase_seed is not None and phase_layouts and phase_layouts[0] is not None:
+                                sk = tuple(_phase_seed)
+                                if sk not in {tuple(p) for p in phase_layouts if p is not None}:
+                                    phase_layouts = [_phase_seed] + list(phase_layouts)
+                            if _pat_map_seed is not None and pat_maps:
+                                pmk = tuple(_pat_map_seed)
+                                if pmk not in {tuple(m) for m in pat_maps if m is not None}:
+                                    pat_maps = [_pat_map_seed] + list(pat_maps)
+
+                            pat_key = tuple(variations) if variations else tuple()
                             candidates: List[Tuple[float, Optional[List[int]], Optional[List[int]], bool]] = []
+                            _flsa_thr = float(_flsa_thr_run)
+                            _win_wds = _win_wds_run
                             for ph in phase_layouts:
-                                if _cancelled():
+                                if _cancelled() or _budget_hit():
                                     break
                                 for pm in pat_maps:
                                     cheap_evals += 1
@@ -1787,22 +3379,30 @@ def optimize_staffing_scenarios(
                                             ),
                                         )
                                     if parsed_patterns and ph is not None and pm is not None:
-                                        bkey = (tuple(ph), tuple(pm))
-                                        if bkey in _body_cache:
-                                            day_counts, fri_sat = _body_cache[bkey]
+                                        gkey = (
+                                            pat_key,
+                                            int(n_off),
+                                            tuple(ph),
+                                            tuple(pm),
+                                            tuple(_win_wds),
+                                        )
+                                        if gkey in _global_body_cache:
+                                            day_counts, win_bodies = _global_body_cache[gkey]
                                         else:
-                                            day_counts, fri_sat = _day_body_counts(
+                                            day_counts, win_bodies = _day_body_counts(
                                                 parsed_patterns,
                                                 ph,
                                                 pm,
                                                 n_slots=int(n_off),
                                                 simulation_days=int(simulation_days),
                                                 sim_start=sim_start,
+                                                window_weekdays=_win_wds,
                                             )
-                                            _body_cache[bkey] = (day_counts, fri_sat)
+                                            _global_body_cache[gkey] = (day_counts, win_bodies)
                                         body_score = (min(day_counts) if day_counts else 0) * 1000 + (
-                                            min(fri_sat) if fri_sat else 0
+                                            min(win_bodies) if win_bodies else 0
                                         ) * 100
+                                        # Light cheap first; defer C3 minute-bin to top ranks
                                         reason = _cheap_reject(
                                             parsed_patterns,
                                             ph,
@@ -1821,9 +3421,17 @@ def optimize_staffing_scenarios(
                                             sim_start=sim_start,
                                             shift_starts=starts,
                                             extra_windows=windows,
-                                            precomputed=(day_counts, fri_sat),
+                                            precomputed=(day_counts, win_bodies),
                                             nearby_hops=nearby_hops,
                                             allow_offday_coverage=offday_ok,
+                                            avoid_flsa=bool(avoid_flsa_overtime),
+                                            flsa_period_days=int(flsa_work_period_days or 28),
+                                            flsa_threshold=float(_flsa_thr),
+                                            max_consecutive_work_days=int(max_consecutive_work_days or 0),
+                                            min_rest_hours=float(min_rest_hours or 0),
+                                            night_minimum=int(night_min or 0),
+                                            rotation_type=str(rot_key or ""),
+                                            skip_window_minute=_defer_win_minute,
                                         )
                                         if reason:
                                             pruned_cheap += 1
@@ -1836,7 +3444,50 @@ def optimize_staffing_scenarios(
                                         else:
                                             candidates.append((float(body_score), ph, pm, True))
                                     else:
-                                        candidates.append((0.0, ph, pm, True))
+                                        # Squad (no multi-block patterns): still cheap-prune packs
+                                        if ph is None and pm is None:
+                                            reason = _cheap_reject(
+                                                None,
+                                                [0] * int(n_off),
+                                                [0] * int(n_off),
+                                                n_slots=int(n_off),
+                                                shift_length=float(length),
+                                                annual_target=float(annual),
+                                                annual_variance=float(annual_hours_variance),
+                                                annual_hard=bool(annual_hours_hard),
+                                                simulation_days=int(simulation_days),
+                                                cov247=cov247,
+                                                use_windows=bool(use_extra_windows and windows),
+                                                window_min=window_min,
+                                                n_bands=n_bands,
+                                                min_ps=int(min_ps),
+                                                sim_start=sim_start,
+                                                shift_starts=starts,
+                                                extra_windows=windows,
+                                                nearby_hops=nearby_hops,
+                                                allow_offday_coverage=offday_ok,
+                                                avoid_flsa=bool(avoid_flsa_overtime),
+                                                flsa_period_days=int(flsa_work_period_days or 28),
+                                                flsa_threshold=float(_flsa_thr),
+                                                max_consecutive_work_days=int(max_consecutive_work_days or 0),
+                                                min_rest_hours=float(min_rest_hours or 0),
+                                                night_minimum=int(night_min or 0),
+                                                rotation_type=str(rot_key or ""),
+                                                skip_window_minute=_defer_win_minute,
+                                            )
+                                            if reason:
+                                                pruned_cheap += 1
+                                                fail_hist["cheap_reject"] += 1
+                                                fail_hist[reason] = fail_hist.get(reason, 0) + 1
+                                                if require_hard_ok:
+                                                    rejected_hard += 1
+                                                candidates.append(
+                                                    (-float(_cheap_penalty.get(reason, 25_000)), ph, pm, False)
+                                                )
+                                            else:
+                                                candidates.append((0.0, ph, pm, True))
+                                        else:
+                                            candidates.append((0.0, ph, pm, True))
                             if _cancelled():
                                 break
 
@@ -1848,16 +3499,79 @@ def optimize_staffing_scenarios(
                                 candidates.append((0.0, None, None, True))
 
                             candidates.sort(key=lambda x: -x[0])
+                            # Defer C3 minute-bin: only top light-pass candidates (not all phase×map)
+                            max_cheap_pass = int(_bud["max_cheap_pass"])
+                            if _defer_win_minute and parsed_patterns:
+                                # Top body-ranked only; exhaustive gets a wider minute budget
+                                _minute_budget = max(max_cheap_pass * 2, 64)
+                                if prefer_exhaustive:
+                                    _minute_budget = max(_minute_budget, max_cheap_pass * 4, 128)
+                                _refined: List[Tuple[float, Optional[List[int]], Optional[List[int]], bool]] = []
+                                _minute_checked = 0
+                                for cheap_score, ph, pm, passed in candidates:
+                                    if (
+                                        passed
+                                        and ph is not None
+                                        and pm is not None
+                                        and _minute_checked < _minute_budget
+                                    ):
+                                        _minute_checked += 1
+                                        cheap_evals += 1
+                                        if _cheap_window_minute_fail(
+                                            parsed_patterns,
+                                            ph,
+                                            pm,
+                                            n_slots=int(n_off),
+                                            shift_starts=starts,
+                                            shift_length=float(length),
+                                            simulation_days=int(simulation_days),
+                                            sim_start=sim_start,
+                                            windows=list(windows),
+                                            nearby_hops=nearby_hops,
+                                            allow_offday_coverage=offday_ok,
+                                        ):
+                                            pruned_cheap += 1
+                                            fail_hist["cheap_reject"] += 1
+                                            fail_hist["window"] = fail_hist.get("window", 0) + 1
+                                            if require_hard_ok:
+                                                rejected_hard += 1
+                                            cheap_score = float(cheap_score) - float(
+                                                _cheap_penalty.get("window", 40_000)
+                                            )
+                                            _refined.append((cheap_score, ph, pm, False))
+                                        else:
+                                            _refined.append((float(cheap_score), ph, pm, True))
+                                    else:
+                                        # Unchecked light-pass: keep passed=True so they
+                                        # remain eligible for full-sim. Never false-fail.
+                                        # Mark search truncated — did not minute-check all.
+                                        if passed and ph is not None and pm is not None:
+                                            search_truncated = True
+                                            _refined.append(
+                                                (
+                                                    float(cheap_score) - 500.0,
+                                                    ph,
+                                                    pm,
+                                                    True,
+                                                )
+                                            )
+                                        else:
+                                            _refined.append((cheap_score, ph, pm, passed))
+                                candidates = _refined
+                                candidates.sort(key=lambda x: -x[0])
+
                             # Full-sim queue: top cheap-pass + top cheap-fail for near-miss
                             full_queue: List[Tuple[float, Optional[List[int]], Optional[List[int]]]] = []
                             cheap_pass_kept = 0
                             cheap_fail_kept = 0
-                            max_cheap_pass = 48
                             for cheap_score, ph, pm, passed in candidates:
                                 if passed:
                                     if cheap_pass_kept < max_cheap_pass:
                                         full_queue.append((cheap_score, ph, pm))
                                         cheap_pass_kept += 1
+                                    else:
+                                        # Eligible pass skipped full-sim → not exhaustive
+                                        search_truncated = True
                                 elif cheap_fail_kept < 5:
                                     full_queue.append((cheap_score, ph, pm))
                                     cheap_fail_kept += 1
@@ -1867,7 +3581,7 @@ def optimize_staffing_scenarios(
                             best_miss_score = -1e18
                             rank_pool_remaining = 4
                             full_this_struct = 0
-                            max_full_per_struct = 24
+                            max_full_per_struct = int(_bud["max_full_per_struct"])
                             # C1 — parallel full-sims: threads default; process pool via env
                             use_proc = _OPT_PROCESS_WORKERS > 0
                             parallel_workers = _OPT_PROCESS_WORKERS if use_proc else _OPT_THREAD_WORKERS
@@ -2024,6 +3738,7 @@ def optimize_staffing_scenarios(
                                             best_miss_row = row
                                         continue
                                     results.append(row)
+                                    _note_hard_found()
                                     if found_hard_structural:
                                         rank_pool_remaining -= 1
                                     else:
@@ -2060,17 +3775,34 @@ def optimize_staffing_scenarios(
                                                     message=(f"Expand phases {cheap_evals:,}"),
                                                 )
                                             if ph is not None and pm is not None:
-                                                day_counts, fri_sat = _day_body_counts(
+                                                _win_wds2 = _window_weekdays_from_extra(
+                                                    windows if use_extra_windows else None
+                                                )
+                                                day_counts, win_bodies = _day_body_counts(
                                                     parsed_patterns,
                                                     ph,
                                                     pm,
                                                     n_slots=int(n_off),
                                                     simulation_days=int(simulation_days),
                                                     sim_start=sim_start,
+                                                    window_weekdays=_win_wds2,
                                                 )
                                                 body_score = (min(day_counts) if day_counts else 0) * 1000 + (
-                                                    min(fri_sat) if fri_sat else 0
+                                                    min(win_bodies) if win_bodies else 0
                                                 ) * 100
+                                                try:
+                                                    from logic.labor_compliance import (
+                                                        flsa_threshold_for_period_days as _flsa_fn2,
+                                                    )
+
+                                                    _flsa_thr2 = float(_flsa_fn2(int(flsa_work_period_days or 28)))
+                                                except Exception:
+                                                    try:
+                                                        from config import (
+                                                            FLSA_207K_HOURS_THRESHOLD as _flsa_thr2,
+                                                        )
+                                                    except Exception:
+                                                        _flsa_thr2 = 171.0
                                                 reason = _cheap_reject(
                                                     parsed_patterns,
                                                     ph,
@@ -2089,10 +3821,16 @@ def optimize_staffing_scenarios(
                                                     sim_start=sim_start,
                                                     shift_starts=starts,
                                                     extra_windows=windows,
-                                                    precomputed=(
-                                                        day_counts,
-                                                        fri_sat,
-                                                    ),
+                                                    precomputed=(day_counts, win_bodies),
+                                                    nearby_hops=nearby_hops,
+                                                    allow_offday_coverage=offday_ok,
+                                                    avoid_flsa=bool(avoid_flsa_overtime),
+                                                    flsa_period_days=int(flsa_work_period_days or 28),
+                                                    flsa_threshold=float(_flsa_thr2),
+                                                    max_consecutive_work_days=int(max_consecutive_work_days or 0),
+                                                    min_rest_hours=float(min_rest_hours or 0),
+                                                    night_minimum=int(night_min or 0),
+                                                    rotation_type=str(rot_key or ""),
                                                 )
                                                 if reason:
                                                     pruned_cheap += 1
@@ -2202,6 +3940,7 @@ def optimize_staffing_scenarios(
                                                 best_miss_row = row
                                             continue
                                         results.append(row)
+                                        _note_hard_found()
                                         if found_hard_structural:
                                             rank_pool_remaining -= 1
                                         else:
@@ -2209,13 +3948,13 @@ def optimize_staffing_scenarios(
                                             rank_pool_remaining = 4
                                     if best_miss_row is not None and not found_hard_structural:
                                         near_misses.append(best_miss_row)
-                    if _cancelled():
+                    if _cancelled() or _budget_hit():
                         break
-                if _cancelled():
+                if _cancelled() or _budget_hit():
                     break
-            if _cancelled():
+            if _cancelled() or _budget_hit():
                 break
-        if _cancelled():
+        if _cancelled() or _budget_hit():
             break
     # rotation loop ends above
 
@@ -2344,6 +4083,14 @@ def optimize_staffing_scenarios(
         msg += f" · {rejected_hard} Ruled Out By Hard Constraints"
     elif rejected_hard and not best:
         msg += f" ({rejected_hard} Combinations Ruled Out)"
+    # Honest anytime / soft-exhaustive stop (UI progress + banner)
+    if not cancelled and (search_truncated or budget_exhausted):
+        if budget_exhausted:
+            msg += f" · Search time limit ({int(anytime_wall)}s) — best so far"
+        elif prefer_exhaustive:
+            msg += " · Partial scan (stopped after hard matches)"
+        else:
+            msg += " · Partial scan (not every layout checked)"
 
     if require_hard_ok:
         success = bool(results)
@@ -2351,7 +4098,9 @@ def optimize_staffing_scenarios(
         for r in results:
             # Group by (rotation_type, num_officers, shift_length) so different N
             # values for the same rotation type both surface in the ranked list.
-            gk = (r["rotation_type"], r["num_officers"], r["shift_length_hours"])
+            starts_k = tuple(r.get("shift_starts") or [])
+            vars_k = tuple(r.get("rotation_variations") or [])
+            gk = (r["rotation_type"], r["num_officers"], r["shift_length_hours"], starts_k, vars_k)
             if gk not in grouped:
                 grouped[gk] = r
         ranked = list(grouped.values())[:15]
@@ -2360,7 +4109,9 @@ def optimize_staffing_scenarios(
         source_list = results if results else near_misses
         grouped = {}
         for r in source_list:
-            gk = (r["rotation_type"], r["num_officers"], r["shift_length_hours"])
+            starts_k = tuple(r.get("shift_starts") or [])
+            vars_k = tuple(r.get("rotation_variations") or [])
+            gk = (r["rotation_type"], r["num_officers"], r["shift_length_hours"], starts_k, vars_k)
             if gk not in grouped:
                 grouped[gk] = r
         ranked = list(grouped.values())[:15]
@@ -2387,12 +4138,17 @@ def optimize_staffing_scenarios(
         "inner_trials": total_eval,
         "full_sims_run": full_sims,
         "pruned_cheap": pruned_cheap,
-        "search_exhaustive": not cancelled,
-        "budget_exhausted": False,
+        "search_exhaustive": bool(
+            not cancelled and not budget_exhausted and not search_truncated and prefer_exhaustive
+        ),
+        "budget_exhausted": bool(budget_exhausted),
+        "search_truncated": bool(search_truncated or budget_exhausted),
         "wall_time_ms": wall_ms,
         "failure_histogram": fail_hist,
         "space_estimate": space,
         "space_note": space.get("warning") or "",
+        "domain_report": domain_reduction_report(axes),
+        "bind_reasons": list(axes.get("bind_reasons") or []),
         "constraint_weights": weights,
         "constraint_priority": list(constraint_priority or []),
         "near_misses": near_misses,
@@ -2417,7 +4173,8 @@ def optimize_staffing_scenarios(
             "rotation_variations": list(axes["base_variations"]),
             "variation_sets": len(axes["variation_sets"]),
             "annual_hours_target": annual,
-            "search_mode": "exhaustive",
+            "search_mode": "exhaustive" if prefer_exhaustive and not search_truncated else "anytime",
             "constraint_weights": weights,
+            "bind_reasons": list(axes.get("bind_reasons") or []),
         },
     }

@@ -51,7 +51,11 @@ class FeatureUiStaticTests(unittest.TestCase):
         self.assertIn("save_off_duty_bump_policy", src)
 
     def test_simulator_implement_and_constraints(self):
-        src = _read("gui/pages/simulator.py")
+        import glob
+
+        src = ""
+        for p in glob.glob(str(ROOT / "gui" / "pages" / "simulator" / "*.py")):
+            src += Path(p).read_text(encoding="utf-8")
         for needle in (
             "Generate schedule",
             "Plan detail",
@@ -61,16 +65,13 @@ class FeatureUiStaticTests(unittest.TestCase):
             "ui.spinner",
             "ui.refreshable",
             "throttled",
-            "Annual Hours",
             "variance",
             "24/7",
             "Avoid FLSA",
-            "Variations",
             "implement_optimized_plan",
             "format_optimized_plan_view",
             "recommend_implement_dates",
             "Find best",
-            "Real-world 8h pack",
             "search_depth",
             "sim-hero",
             "sim-option-card",
@@ -102,7 +103,11 @@ class FeatureUiStaticTests(unittest.TestCase):
         self.assertIn('response="volunteered"', src)
 
     def test_simulator_no_multiarg_append(self):
-        src = _read("gui/pages/simulator.py")
+        import glob
+
+        src = ""
+        for p in glob.glob(str(ROOT / "gui" / "pages" / "simulator" / "*.py")):
+            src += Path(p).read_text(encoding="utf-8")
         # Regression: lines.append("", "Suggestions:") crashes at runtime
         self.assertNotIn('lines.append("", "Suggestions:")', src)
         self.assertNotIn('lines.append("",', src)

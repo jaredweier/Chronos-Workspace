@@ -751,13 +751,13 @@ def main():
     )
     verify = sub.add_parser(
         "verify",
-        help="Unified verification (fast|preflight|check|full|release)",
+        help="Unified verification (core|fast|preflight|check|full|release|agent-meta)",
     )
     verify.add_argument(
         "--tier",
         default="check",
-        choices=["fast", "preflight", "check", "full", "release"],
-        help="Verification depth (default: check = ship gate)",
+        choices=["core", "fast", "preflight", "check", "full", "release", "agent-meta"],
+        help="Verification depth (default: check = ship; core = product; agent-meta = tooling)",
     )
     verify.add_argument(
         "--with-refactor",

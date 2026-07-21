@@ -74,38 +74,68 @@ def min_occupancy_in_range(
     *,
     step_minutes: int = 15,
 ) -> int:
-    """Minimum headcount over [range_start, range_end) using sweep line."""
+    """Minimum headcount over [range_start, range_end) using sweep line.
+
+    Occupancy is piecewise-constant; extrema only change at event times.
+    Samples occupancy at range_start and after every event inside the range.
+    ``step_minutes`` is kept for API compat (unused — event sampling is exact).
+    """
+    del step_minutes  # API compat; sweep events are exact for half-open intervals
     if range_end <= range_start:
         return 0
 
     events = build_occupancy_events(assignments)
 
     current_occ = 0
-
-    # Compute occupancy exactly at range_start
-    for t, delta in events:
-        if t <= range_start:
-            current_occ += delta
-        else:
-            break
-
-    min_occ = current_occ
-    current_occ = 0
-
     i = 0
     n = len(events)
+
+    # Apply all events at or before range_start → occupancy at range_start
+    while i < n and events[i][0] <= range_start:
+        current_occ += events[i][1]
+        i += 1
+
+    min_occ = current_occ
+
+    # Walk events strictly inside the open-ended window
     while i < n:
         t = events[i][0]
-        # process all events at time t
+        if t >= range_end:
+            break
+        # Process all deltas at this timestamp (+1 before -1 via sort key)
         while i < n and events[i][0] == t:
             current_occ += events[i][1]
             i += 1
-
-        if t >= range_start and t < range_end:
-            if current_occ < min_occ:
-                min_occ = current_occ
+        if t >= range_start and current_occ < min_occ:
+            min_occ = current_occ
 
     return min_occ
+
+
+def normalize_weekdays(raw) -> Optional[Tuple[int, ...]]:
+    """
+    Normalize weekday field to a sorted tuple of 0=Mon..6=Sun, or None (all days).
+
+    Accepts int, list/tuple/set of ints, or None / "".
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return (int(raw) % 7,)
+    if isinstance(raw, (list, tuple, set)):
+        out = []
+        for item in raw:
+            try:
+                out.append(int(item) % 7)
+            except (TypeError, ValueError):
+                continue
+        return tuple(sorted(set(out))) if out else None
+    try:
+        return (int(raw) % 7,)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -115,16 +145,22 @@ class CoverageWindow:
     min_officers: int
     start_time: str  # HH:MM
     end_time: str  # HH:MM
-    # Exactly one of specific_date or weekday (0=Mon..6=Sun) should apply when matching
+    # specific_date and weekday are independent: date wins when set
     specific_date: Optional[date] = None
-    weekday: Optional[int] = None  # Python weekday()
+    # int or sequence of ints (0=Mon..6=Sun); None = every day
+    weekday: Optional[object] = None
     label: str = ""
+
+    def weekday_set(self) -> Optional[set]:
+        """None = all days; else set of Python weekday() ints."""
+        return None if normalize_weekdays(self.weekday) is None else set(normalize_weekdays(self.weekday) or ())
 
     def matches_date(self, d: date) -> bool:
         if self.specific_date is not None:
             return d == self.specific_date
-        if self.weekday is not None:
-            return d.weekday() == self.weekday
+        wds = normalize_weekdays(self.weekday)
+        if wds is not None:
+            return d.weekday() in wds
         return True
 
     def window_datetimes(self, d: date) -> Tuple[datetime, datetime]:

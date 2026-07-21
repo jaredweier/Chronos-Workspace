@@ -59,16 +59,36 @@ SIM_CSS = """
           /* Titles and Typography */
           .sim-panel-title, .sim-section-title {
               font-family: 'Rajdhani', 'IBM Plex Sans', sans-serif;
-              font-size: 1.5rem;
+              font-size: 1.25rem; /* DESIGN.md title 20px */
               font-weight: 600;
               letter-spacing: -0.02em;
               color: #fff;
-              margin-bottom: 1.5rem;
+              margin-bottom: 0.75rem;
               display: flex;
               align-items: center;
-              gap: 12px;
+              gap: 10px;
               border-bottom: 1px solid rgba(255,255,255,0.05);
-              padding-bottom: 16px;
+              padding-bottom: 10px;
+          }
+          .sim-micro {
+              font-family: 'IBM Plex Sans', sans-serif;
+              font-size: 11px;
+              font-weight: 600;
+              letter-spacing: 0.06em;
+              text-transform: uppercase;
+              color: var(--muted);
+          }
+          .sim-hero-sub {
+              font-size: 0.875rem;
+              color: var(--muted);
+              max-width: 42rem;
+              line-height: 1.4;
+              margin: 0 0 0.75rem 0;
+          }
+          .sim-quickstart {
+              padding: 8px 0 4px;
+              border-bottom: 1px solid rgba(255,255,255,0.04);
+              margin-bottom: 8px;
           }
 
           /*

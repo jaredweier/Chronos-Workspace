@@ -354,24 +354,32 @@ SIMULATOR_ROTATION_TYPES = [
     "Equal split (custom cycle)",
 ]
 
-# Common multi-block / on-off catalogs for simulator pattern dropdown (not squad presets).
+# Optional multi-block *examples* for the simulator dropdown (not product law).
+# Free search builds families from annual hours + shift length algebra instead.
+# Variations separated by | = different officers may use different patterns of the
+# same cycle (e.g. some 6-2,5-3-class and some complementary 6-3,5-2-class).
 SIMULATOR_MULTI_BLOCK_CATALOG = [
-    {"label": "Custom (type below)", "style": "rotating", "variations": ""},
-    {"label": "6-2,5-3 | 6-3,5-2 (rotating)", "style": "rotating", "variations": "6-2,5-3 | 6-3,5-2"},
-    {"label": "5-2,6-3 | 5-3,6-2 (rotating)", "style": "rotating", "variations": "5-2,6-3 | 5-3,6-2"},
-    {"label": "5-3,6-2 | 6-2,5-3 (rotating)", "style": "rotating", "variations": "5-3,6-2 | 6-2,5-3"},
-    {"label": "4-3,3-4 | 3-4,4-3 (rotating)", "style": "rotating", "variations": "4-3,3-4 | 3-4,4-3"},
-    {"label": "2-2-3 blocks as 2-2,3-2,2-3", "style": "rotating", "variations": "2-2,3-2,2-3"},
-    {"label": "5-2 fixed", "style": "fixed", "variations": "5-2"},
-    {"label": "5-3 fixed", "style": "fixed", "variations": "5-3"},
-    {"label": "4-3 fixed", "style": "fixed", "variations": "4-3"},
-    {"label": "4-4 fixed", "style": "fixed", "variations": "4-4"},
-    {"label": "3-3 fixed", "style": "fixed", "variations": "3-3"},
-    {"label": "6-2 fixed", "style": "fixed", "variations": "6-2"},
-    {"label": "6-3 fixed", "style": "fixed", "variations": "6-3"},
-    {"label": "7-7 fixed", "style": "fixed", "variations": "7-7"},
-    {"label": "2-2 fixed", "style": "fixed", "variations": "2-2"},
-    {"label": "3-4 fixed", "style": "fixed", "variations": "3-4"},
+    {"label": "Custom (type patterns below)", "style": "rotating", "variations": ""},
+    {
+        "label": "Example 16d mix: 6-2,5-3 | 6-3,5-2",
+        "style": "rotating",
+        "variations": "6-2,5-3 | 6-3,5-2",
+    },
+    {
+        "label": "Example 16d order flip: 5-2,6-3 | 5-3,6-2",
+        "style": "rotating",
+        "variations": "5-2,6-3 | 5-3,6-2",
+    },
+    {
+        "label": "Example 14d mix: 4-3,3-4 | 3-4,4-3",
+        "style": "rotating",
+        "variations": "4-3,3-4 | 3-4,4-3",
+    },
+    {"label": "Example fixed 5-2", "style": "fixed", "variations": "5-2"},
+    {"label": "Example fixed 5-3", "style": "fixed", "variations": "5-3"},
+    {"label": "Example fixed 4-3", "style": "fixed", "variations": "4-3"},
+    {"label": "Example fixed 6-2", "style": "fixed", "variations": "6-2"},
+    {"label": "Example fixed 6-3", "style": "fixed", "variations": "6-3"},
 ]
 
 DEFAULT_OVERTIME_MULTIPLIER = 1.5

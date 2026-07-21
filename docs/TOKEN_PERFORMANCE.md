@@ -17,8 +17,9 @@
 | **Plan → implement once beats 3 fix loops** | Multi-file / ambiguous work: short plan + inventory; then one edit batch. |
 | **~80% of verify is free local** (this repo) | Run `dev.py` gates yourself; don’t burn Agent turns rediscovering imports/audit. |
 | **Half-fixes cost more than full inventory** | One `rg` + fix-all is cheaper than “fixed one place” → user angry → 2 more sessions. |
-| **Subagents multiply context** | Never spawn subagents for `verify` / `cheap-check` / `preflight` / `audit`. |
-| **Images are expensive** | No baseline PNG dumps; one failed `ui-diff` only; no vision before static `ui-review`. |
+| **Subagents multiply context** | Default: no subagent for gates. Spawn only when cheaper than primary. |
+| **Images / graphify are expensive** | No thrash dumps; vision/graphify only when cost/ROI beats primary; static `ui-review` first when enough. |
+| **Archived skills** | Use only while needed; put back in `docs/archived_skills/` after. |
 
 ---
 

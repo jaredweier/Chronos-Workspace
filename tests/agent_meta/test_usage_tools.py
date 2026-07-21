@@ -17,7 +17,7 @@ class UsageToolsTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_cheap_check_runs(self):
-        root = __import__("os").path.dirname(__import__("os").path.dirname(__file__))
+        root = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.dirname(__file__)))
         result = subprocess.run(
             [sys.executable, "dev.py", "cheap-check"],
             cwd=root,

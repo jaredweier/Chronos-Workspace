@@ -75,9 +75,15 @@ def build_agent_pack(
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "stable: docs/AGENT_STABLE.md",
         "",
-        "## Minimize (mandatory)",
-        "1. `usage-brief <slice>` 2. `outline`/`symbol` 3. edit 4. `cheap-check`",
-        "Prompts/index: `token-improve` → `token-audit --strict`",
+        "## FIRST: Caveman + Minimize (mandatory)",
+        "- **Caveman:** short bullets. No preamble/recap/let-me. Prose only if user asks explain/docs.",
+        "- **Token min:** fewest tools that finish fully+well. Parallel OK when it wins.",
+        "- **Cost split:** easy → cheap/free; hard product/logic → primary. Prefer lower total usage.",
+        "- Chain: `route-task` once → skill if helpful → edit/delegate → light=`fast` · logic/gui=`core` · ship=`check`",
+        "- Tools/skills/subagents OK if cheaper/better. Gates/graphify/vision OK if cheaper than primary.",
+        "- Archived skills: use only while needed, then put back in `docs/archived_skills/`.",
+        "- Ship: `verify --tier check` + `honest_gate: true`. Never done on fast. Policy: `.grok/rules/auto-minimize.md`",
+        "- Prompts/index: `token-improve` → `token-audit --strict`",
         "",
     ]
 

@@ -282,8 +282,8 @@ def build_rows() -> List[FeatureRow]:
     add(
         "Ops",
         "Scenario / what-if simulator",
-        "have" if _logic_has("run_staffing_optimizer") or _exists("gui/pages/simulator.py") else "missing",
-        "gui/pages/simulator.py",
+        "have" if _logic_has("run_staffing_optimizer") or _exists("gui/pages/simulator/page.py") else "missing",
+        "gui/pages/simulator/page.py",
         "Staffing planning",
     )
 

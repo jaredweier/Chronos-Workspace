@@ -21,11 +21,12 @@ def _parse_window_dict(item: Dict) -> Optional[CoverageWindow]:
         if not start or not end:
             return None
         specific = item.get("specific_date") or item.get("date")
-        weekday = item.get("weekday")
-        if weekday is not None and weekday != "":
-            weekday = int(weekday)
-        else:
-            weekday = None
+        from logic.coverage_timeline import normalize_weekdays
+
+        weekday = normalize_weekdays(item.get("weekday", item.get("weekdays", item.get("dow"))))
+        # Store single int when one day (UI/legacy); tuple when multi
+        if weekday is not None and len(weekday) == 1:
+            weekday = weekday[0]
         specific_date = None
         if specific:
             specific_date = parse_date(str(specific)) if not isinstance(specific, date) else specific

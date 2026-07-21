@@ -89,9 +89,9 @@ Catalog + URLs: **`docs/UI_AGENTS_CATALOG.md`**. Wired in `scripts/agent_route.p
 | high complexity | domain skill + qa-verify |
 | vision / browser | ui-vision-review + ui-development |
 | chronos medium | ui-development + token-discipline |
-| verify / trivial / low | **none** (no subagent tax) |
+| verify / trivial / low | **none by default**; subagent OK **only if cheaper** than primary |
 
-**Never** subagent for `verify` / `cheap-check` / `preflight` / `audit`.
+**Verify/gates/graphify/vision:** subagent OK when total usage is **less** than primary doing the same work.
 
 ---
 
