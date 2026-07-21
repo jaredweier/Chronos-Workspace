@@ -41,7 +41,7 @@ jobs:
           Compress-Archive -Path "dist/Dodgeville_PD_Portable/*" -DestinationPath $zip
           echo "ZIP_PATH=$zip" >> $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Dodgeville_PD_Portable_${{ github.ref_name }}
           path: |
