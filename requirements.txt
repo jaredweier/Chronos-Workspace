@@ -4,5 +4,5 @@ pillow
 reportlab
 
 # Duty Console — modern web + native UI (primary)
-nicegui>=2.0
+nicegui>=3.14.0
 pywebview>=5.0
