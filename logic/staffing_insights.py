@@ -123,7 +123,7 @@ def enrich_option_economics(
     ot_total = round(ot_per * max(n, 1) + pressure_ot, 1)
     cost = estimate_ot_cost(ot_hours=ot_total, hourly_rate=hourly_rate)
 
-    # Fairness proxies from metrics when present
+    # Fairness proxies from metrics when present (+ night/weekend balance when flags exist)
     annual_spread = float(m.get("annual_hours_spread") or 0)
     fairness = 100.0
     if annual_spread > 40:
@@ -132,6 +132,18 @@ def enrich_option_economics(
         fairness -= min(25, win_fail * 5)
     if c247_fail:
         fairness -= min(25, c247_fail * 5)
+    try:
+        from logic.soft_rank import night_weekend_balance
+
+        bal = night_weekend_balance(out)
+        night_sp = float(bal.get("night_load_spread") or 0)
+        week_sp = float(bal.get("weekend_load_spread") or 0)
+        if night_sp > 0:
+            fairness -= min(20, night_sp * 2.0)
+        if week_sp > 0:
+            fairness -= min(15, week_sp * 2.5)
+    except Exception:
+        pass
     fairness = max(0.0, round(fairness, 1))
 
     try:

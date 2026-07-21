@@ -230,6 +230,14 @@ def explain_staffing_result(result: Optional[Dict[str, Any]] = None) -> List[str
         if why:
             lines.append("Why #1:")
             lines.extend(f"  {w}" for w in why[:5])
+        best = r.get("best") or {}
+        if best.get("soft_rank_note") or best.get("soft_score") is not None:
+            lines.append(
+                "Soft rank (among hard-OK): " + (best.get("soft_rank_note") or f"score {best.get('soft_score')}")
+            )
+        sr = r.get("soft_rank") or {}
+        if sr.get("message") and sr.get("message") not in "\n".join(lines):
+            lines.append(str(sr["message"]))
     return lines
 
 

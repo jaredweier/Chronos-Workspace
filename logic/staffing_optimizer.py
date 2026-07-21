@@ -2521,6 +2521,7 @@ def optimize_staffing_scenarios(
     free_variations: bool = False,
     constraint_weights: Optional[Dict[str, float]] = None,
     constraint_priority: Optional[List[str]] = None,
+    soft_prefs: Optional[Dict[str, float]] = None,  # soft rank among hard-OK only
     nearby_start_hops: int = 1,
     allow_offday_coverage: bool = False,
     min_rest_hours: float = 0.0,
@@ -2953,6 +2954,9 @@ def optimize_staffing_scenarios(
             "failed_constraints": failed,
             "phase_overrides": list(ph) if ph is not None else None,
             "pattern_slot_map": list(pm) if pm is not None else None,
+            # Soft rank / Gantt: duty flags + coverage (P2/P3)
+            "officer_slots": [s.__dict__ if hasattr(s, "__dict__") else s for s in (sim.officer_slots or [])],
+            "coverage_by_day": list(sim.coverage_by_day or []),
             "suggestions": [
                 {
                     "severity": s.severity,
@@ -4053,6 +4057,25 @@ def optimize_staffing_scenarios(
     except Exception:
         pass
 
+    # Soft rank among hard-OK only (prefs never override hard feasibility)
+    soft_msg = None
+    soft_prefs_used = None
+    try:
+        from logic.soft_rank import rank_soft_among_feasible
+
+        _soft = rank_soft_among_feasible(
+            results,
+            soft_prefs if isinstance(soft_prefs, dict) else None,
+        )
+        soft_ok = [r for r in (_soft.get("ranked") or []) if r.get("hard_constraints_ok")]
+        if soft_ok:
+            results = soft_ok
+        soft_msg = _soft.get("message")
+        soft_prefs_used = _soft.get("prefs_used")
+    except Exception:
+        soft_msg = None
+        soft_prefs_used = None
+
     wall_ms = int((time.perf_counter() - t0) * 1000)
     total_eval = cheap_evals
     best = results[0] if results else None
@@ -4089,6 +4112,8 @@ def optimize_staffing_scenarios(
             msg += " · Partial scan (stopped after hard matches)"
         else:
             msg += " · Partial scan (not every layout checked)"
+    if soft_msg and best and best.get("hard_constraints_ok"):
+        msg = f"{msg} · {soft_msg}" if msg else soft_msg
 
     if require_hard_ok:
         success = bool(results)
@@ -4149,6 +4174,11 @@ def optimize_staffing_scenarios(
         "bind_reasons": list(axes.get("bind_reasons") or []),
         "constraint_weights": weights,
         "constraint_priority": list(constraint_priority or []),
+        "soft_prefs": soft_prefs_used,
+        "soft_rank": {
+            "applied": bool(soft_prefs_used and best and best.get("hard_constraints_ok")),
+            "message": soft_msg,
+        },
         "near_misses": near_misses,
         "best": best_out,
         "ranked": ranked,

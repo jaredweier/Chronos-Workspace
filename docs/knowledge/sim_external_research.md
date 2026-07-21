@@ -31,7 +31,7 @@ Coverage heat strip · gap board · open shift / callout · bid/preference captu
 |------|--------|
 | **P0** | Stabilize extract wiring + honest metrics — **landed** `0d5b83a` |
 | **P1** | Constraint autopsy + live cheap feasibility strip — **landed** (`logic/constraint_autopsy.py`) |
-| **P2** | Hard-then-soft pipeline; fairness min–max; prefs among feasible |
+| **P2** | Hard-then-soft pipeline; fairness min–max; prefs among feasible — **landed** (`logic/soft_rank.py`) |
 | **P3** | Heatmap prominence; officer Gantt; side-by-side compare — **landed** (`logic/sim_visuals.py`, `gui/pages/simulator/visuals_panel.py`) |
 | **P4** | Open-shift / bid bridge after implement |
 

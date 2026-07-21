@@ -322,6 +322,57 @@ def render_simulator() -> None:
 
                             sl.on_value_change(_sync_w)
 
+            # P2 — soft prefs only re-rank among hard-OK (OR-Tools preference style)
+            from logic.soft_rank import default_soft_prefs
+
+            if "soft_prefs" not in state:
+                state["soft_prefs"] = default_soft_prefs()
+            with ui.expansion(
+                "Soft preferences (among hard-OK only)",
+                icon="balance",
+            ).classes("sim-adv w-full"):
+                ui.label(
+                    "These never block Find Best. After hard constraints pass, options are "
+                    "re-ranked by fairness / OT / headcount prefs (Timefold-style soft scores)."
+                ).style(_HINT)
+                soft_sliders: dict = {}
+                with ui.column().classes("w-full gap-1 q-mb-sm"):
+                    for skey, slabel in (
+                        ("balance_nights", "Balance night load"),
+                        ("balance_weekends", "Balance weekend work"),
+                        ("fewer_officers", "Prefer fewer officers"),
+                        ("lower_ot", "Prefer lower est. OT"),
+                        ("lower_annual_spread", "Lower annual hours spread"),
+                        ("prefer_night_starts", "Prefer packs with night starts"),
+                    ):
+                        with ui.row().classes("gap-2 items-center flex-wrap"):
+                            ui.label(slabel).style("color:#D6E6FF;min-width:12rem")
+                            ssl = (
+                                ui.slider(
+                                    min=0,
+                                    max=2,
+                                    value=float((state.get("soft_prefs") or {}).get(skey, 0)),
+                                    step=0.1,
+                                )
+                                .classes("w-48")
+                                .props("label dark")
+                            )
+                            soft_sliders[skey] = ssl
+
+                            def _sync_soft(e=None, k=skey, s=ssl):
+                                prefs = dict(state.get("soft_prefs") or default_soft_prefs())
+                                prefs[k] = float(s.value or 0)
+                                state["soft_prefs"] = prefs
+
+                            ssl.on_value_change(_sync_soft)
+                ui.button(
+                    "Reset soft prefs",
+                    on_click=lambda: (
+                        state.update({"soft_prefs": default_soft_prefs()}),
+                        ui.notify("Soft prefs reset to defaults", type="info"),
+                    ),
+                ).classes("btn-ghost").props("no-caps outline dense")
+
             def set_space_warn(text: str, *, risk: str = "low"):
                 space_warn.clear()
                 rk = risk if risk in ("low", "medium", "high", "extreme") else "medium"

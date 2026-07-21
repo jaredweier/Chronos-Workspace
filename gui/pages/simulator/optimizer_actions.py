@@ -142,6 +142,8 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
             ),
             "constraint_priority": list(state.get("constraint_priority") or []),
             "constraint_weights": dict(state.get("constraint_weights") or default_weight_map()),
+            # Soft prefs only re-rank hard-OK options (never change feasibility)
+            "soft_prefs": dict(state.get("soft_prefs") or {}),
         }
 
     def _refresh_space_estimate():
@@ -168,6 +170,7 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
                     "simulation_days",
                     "constraint_priority",
                     "constraint_weights",
+                    "soft_prefs",
                     "stagger_phases",
                     "min_rest_hours",
                     "max_consecutive_work_days",

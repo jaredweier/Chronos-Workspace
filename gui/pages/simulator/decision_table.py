@@ -78,6 +78,7 @@ def build_decision_table(
         (f"Est. OT cost / {flsa_period_days}d", lambda r: econ(r, "est_ot_cost_usd"), "min"),
         ("Est. OT hours", lambda r: econ(r, "est_ot_hours_total"), "min"),
         ("Fairness score", lambda r: econ(r, "fairness_score"), "max"),
+        ("Soft score", lambda r: r.get("soft_score"), "max"),
         ("FLSA period load", lambda r: econ(r, "flsa_period_pct"), None),
         ("Fatigue score", lambda r: (option_fatigue_score(r) or {}).get("score"), "max"),
     ]
