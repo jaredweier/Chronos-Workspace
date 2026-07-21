@@ -89,6 +89,24 @@ def open_no_match_dialog(
             body += f"\n\n{extra}"
         ui.label(body).style("color:#9AABC4;margin:12px 0;line-height:1.45;white-space:pre-wrap")
 
+        # Structured constraint autopsy (Timefold-style explain / WFM gap board)
+        try:
+            from logic.constraint_autopsy import constraint_autopsy
+
+            auto = constraint_autopsy(opt_result or {}, config or {})
+            if auto.get("reasons") or auto.get("summary"):
+                ui.label("Why It Failed").style("color:#FCA5A5;font-weight:700;margin-top:6px")
+                if auto.get("summary"):
+                    ui.label(str(auto["summary"])).style(
+                        "color:#FDE68A;font-size:0.9rem;margin:4px 0 8px;line-height:1.4"
+                    )
+                for reason in (auto.get("reasons") or [])[:5]:
+                    ui.label(f"· {reason.get('label')}: {reason.get('detail') or reason.get('count')}").style(
+                        "color:#E8EDF4;font-size:0.88rem;margin-top:2px"
+                    )
+        except Exception:
+            pass
+
         sugs: list = []
         try:
             from logic.optimizer_features import suggest_relaxations
@@ -96,6 +114,21 @@ def open_no_match_dialog(
             sugs = suggest_relaxations(opt_result or {}, config or {}) or []
         except Exception:
             sugs = []
+        if not sugs:
+            try:
+                from logic.constraint_autopsy import constraint_autopsy
+
+                for u in (constraint_autopsy(opt_result or {}, config or {}).get("unlocks") or [])[:3]:
+                    sugs.append(
+                        {
+                            "action": u.get("action"),
+                            "why": u.get("why"),
+                            "estimated_unlock": u.get("estimated_unlock"),
+                            "category": u.get("category") or "general",
+                        }
+                    )
+            except Exception:
+                pass
 
         if sugs and apply_relaxation and on_apply_and_research:
             ui.label("Fix it with one click").style("color:#86efac;font-weight:600;margin-top:4px")

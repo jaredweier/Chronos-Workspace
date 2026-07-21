@@ -184,12 +184,45 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
             f"Layouts In Space: {int(est.get('total_layouts') or 0):,}",
             f"Free Dimensions: {', '.join(est.get('free_dimensions') or []) or 'none (fully locked)'}",
         ]
+        # Live cheap feasibility strip (no 56d sim) — hard body floor only; soft annual caution
+        try:
+            from logic.constraint_autopsy import cheap_feasibility_strip
+
+            form_snap = {
+                "num_officers": kw.get("num_officers"),
+                "auto_min_officers": kw.get("auto_min_officers"),
+                "shift_length_hours": kw.get("shift_length_hours"),
+                "coverage_247": kw.get("coverage_247"),
+                "min_per_shift": kw.get("min_per_shift"),
+                "shift_starts": kw.get("shift_starts"),
+                "extra_windows": kw.get("extra_windows"),
+                "annual_hours_target": kw.get("annual_hours_target"),
+            }
+            # Prefer live form when optimizer kwargs omit unlocked dims
+            try:
+                cfg = current_config() if callable(current_config) else {}
+                if isinstance(cfg, dict):
+                    form_snap = {**form_snap, **{k: cfg.get(k, form_snap.get(k)) for k in form_snap}}
+            except Exception:
+                pass
+            strip = cheap_feasibility_strip(form_snap)
+            state["feasibility_strip"] = strip
+            for ln in strip.get("lines") or []:
+                if ln:
+                    lines.append(ln)
+            # Escalate risk if body floor blocks locked N
+            sr = strip.get("risk") or "low"
+            order = {"low": 0, "medium": 1, "high": 2, "extreme": 3}
+            if order.get(sr, 0) > order.get(risk, 0):
+                risk = sr
+        except Exception:
+            pass
         if est.get("requires_confirm"):
             lines.append(
                 "Confirm before Find Best — this can take a long time. "
                 "Lock officer count / starts / length if possible."
             )
-        set_space_warn("\n".join(lines), risk=risk)
+        set_space_warn("\n".join([x for x in lines if x]), risk=risk)
         return est
 
     def _paint_search_mode_badge(result: dict) -> None:

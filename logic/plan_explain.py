@@ -210,8 +210,21 @@ def explain_staffing_result(result: Optional[Dict[str, Any]] = None) -> List[str
     if kept is not None and r.get("success"):
         lines.append(f"Options Kept: {int(kept)}")
     if r.get("impossible") or not r.get("success"):
-        for s in suggest_unlocks(r)[:4]:
-            lines.append(f"Tip: {s}")
+        # Structured autopsy (WFM gap-board / explain-score style)
+        try:
+            from logic.constraint_autopsy import constraint_autopsy, format_autopsy_lines
+
+            auto = constraint_autopsy(r, r.get("constraints_applied") or {})
+            alines = format_autopsy_lines(auto, max_lines=10)
+            if alines:
+                lines.append("Constraint Autopsy:")
+                lines.extend(alines)
+            else:
+                for s in suggest_unlocks(r)[:4]:
+                    lines.append(f"Tip: {s}")
+        except Exception:
+            for s in suggest_unlocks(r)[:4]:
+                lines.append(f"Tip: {s}")
     if r.get("success") and r.get("best"):
         why = why_best_lines(r)
         if why:

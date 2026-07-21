@@ -29,8 +29,8 @@ Coverage heat strip · gap board · open shift / callout · bid/preference captu
 
 | Tier | Focus |
 |------|--------|
-| **P0** | Stabilize extract wiring + honest metrics (this session) |
-| **P1** | Constraint autopsy + live cheap feasibility strip |
+| **P0** | Stabilize extract wiring + honest metrics — **landed** `0d5b83a` |
+| **P1** | Constraint autopsy + live cheap feasibility strip — **landed** (`logic/constraint_autopsy.py`) |
 | **P2** | Hard-then-soft pipeline; fairness min–max; prefs among feasible |
 | **P3** | Heatmap prominence; officer Gantt; side-by-side compare |
 | **P4** | Open-shift / bid bridge after implement |
