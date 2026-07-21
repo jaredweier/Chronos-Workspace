@@ -88,6 +88,8 @@ class SimulatorOfficerSlot:
     shift_end: str
     projected_annual_hours: float
     work_days_in_sim: int
+    # Per-sim-day ON/OFF (length = simulation_days). Used by heat/Gantt visuals.
+    work_flags: List[bool] = field(default_factory=list)
 
 
 @dataclass
@@ -114,6 +116,19 @@ def _format_minutes(total: int) -> str:
 
 def _shift_end(start: str, hours: float) -> str:
     return _format_minutes(_parse_time_minutes(start) + int(hours * 60))
+
+
+def _attach_slot_work_flags(
+    slots: List[SimulatorOfficerSlot],
+    per_slot_work_flags: List[List[bool]],
+) -> None:
+    """Copy duty flags onto slots for heatmap / Gantt consumers."""
+    for si, slot in enumerate(slots):
+        flags = per_slot_work_flags[si] if si < len(per_slot_work_flags) else []
+        try:
+            slot.work_flags = list(flags)
+        except Exception:
+            pass
 
 
 def _is_night_shift_start(start: str) -> bool:
@@ -2307,6 +2322,7 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
             "coverage_247_ok": None,  # not evaluated in phase 2
             "rest_failures": None,
         }
+        _attach_slot_work_flags(slots, per_slot_work_flags)
         return SimulatorResult(
             success=True,
             message="Phase 2 (Chronological Assignments) complete.",
@@ -2538,6 +2554,8 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
         message = "Simulation complete — extra staffing windows not fully met"
     elif config.coverage_247 and not coverage_247_ok:
         message = "Simulation complete — 24/7 minimum not fully met"
+
+    _attach_slot_work_flags(slots, per_slot_work_flags)
 
     return SimulatorResult(
         success=True,

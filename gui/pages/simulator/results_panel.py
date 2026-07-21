@@ -9,6 +9,7 @@ from logic.optimizer_features import (
     unpin_option,
     weekend_night_heat_lines,
 )
+from logic.sim_visuals import coverage_band_heatmap
 
 
 def render_results_panel_tools(state, _apply_ranked_option, _apply_form_payload, set_plan, plan_box, _ui_safe, set_why):
@@ -127,10 +128,29 @@ def render_results_panel_tools(state, _apply_ranked_option, _apply_form_payload,
         dlg.open()
 
     def do_heat():
-        res = state.get("result") or {}
+        res = state.get("result") or state.get("opt_result") or {}
+        band = coverage_band_heatmap(res, max_days=21)
+        # Prefer day×start band heat (coverage_by_day); fall back to weekday×slot PNG path
+        if band.get("success"):
+
+            def _render_band():
+                plan_box.clear()
+                with plan_box:
+                    from gui.pages.simulator.visuals_panel import render_coverage_heatmap
+
+                    host = ui.element("div").classes("w-full")
+                    render_coverage_heatmap(host, res, max_days=21)
+                    ui.label("Also available under Explain → Coverage heat.").style(
+                        "color:#9AABC4;font-size:0.8rem;margin-top:8px"
+                    )
+
+            _ui_safe(_render_band)
+            ui.notify("Coverage heat (day × start) ready", type="info")
+            return
+
         hm = shift_coverage_heatmap(res)
         if not hm.get("success"):
-            set_plan("Heatmap unavailable: " + str(hm.get("message")))
+            set_plan("Heatmap unavailable: " + str(hm.get("message") or band.get("message")))
             return
 
         def _render():

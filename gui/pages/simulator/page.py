@@ -32,6 +32,7 @@ from gui.pages.simulator.search_hero import build_search_hero
 from gui.pages.simulator.side_actions import bind_side_actions
 from gui.pages.simulator.stepper_rail import render_stepper_rail
 from gui.pages.simulator.styles import apply_simulator_css
+from gui.pages.simulator.visuals_panel import bind_visuals_panel
 from gui.shell import layout, page_header
 from gui.ui_patterns import skeleton_block, throttled
 from logic import (
@@ -418,6 +419,9 @@ def render_simulator() -> None:
                 ):
                     ui.menu_item("Plain English explain", on_click=lambda: run_plain_explain())
                     ui.menu_item("Fairness report", on_click=lambda: run_fairness())
+                    ui.menu_item("Coverage heat (day×start)", on_click=lambda: open_heat_dialog())
+                    ui.menu_item("Officer duty Gantt", on_click=lambda: open_gantt_dialog())
+                    ui.menu_item("Refresh heat & Gantt", on_click=lambda: paint_visuals())
                     ui.menu_item("Weekend heat", on_click=lambda: show_weekend_heat())
                     ui.menu_item("Heat map (PNG)", on_click=lambda: do_heat())
                     ui.menu_item("Window failures", on_click=lambda: do_window_drill())
@@ -445,6 +449,8 @@ def render_simulator() -> None:
 
             # Decision table paints here after every search (primary output)
             decision_host = ui.element("div").classes("w-full q-mt-sm")
+            # Coverage heat + officer Gantt (P3 — WFM-style first-class visuals)
+            visuals_host = ui.element("div").classes("w-full q-mt-sm")
 
             # Splitter: ranked options | plan detail (NiceGUI layout primitive)
             with ui.splitter(value=52).classes("w-full sim-split q-mt-sm") as result_split:
@@ -947,11 +953,21 @@ def render_simulator() -> None:
         _load_option = _rr["load_option"]
         _run_stress_test = _rr["run_stress_test"]
         _paint_decision_table = _rr["paint_decision_table"]
-        _render_ranked = _rr["render_ranked"]
+        _render_ranked_core = _rr["render_ranked"]
         _apply_ranked_option = _rr["apply_ranked_option"]
         _apply_relaxation = _rr["apply_relaxation"]
         _show_no_match_dialog = _rr["show_no_match_dialog"]
         _precheck_conflicts = _rr["precheck_conflicts"]
+
+        def _render_ranked(ranked, selected=1):
+            """Ranked refresh + optional coverage heat / Gantt paint."""
+            _render_ranked_core(ranked, selected=selected)
+            paint = state.get("_paint_visuals")
+            if callable(paint):
+                try:
+                    paint()
+                except Exception:
+                    pass
 
         # Optimizer actions (package) — after form + chrome + ranked helpers exist
         _oa = bind_optimizer_actions(
@@ -1156,6 +1172,12 @@ def render_simulator() -> None:
         do_window_drill = _result_tools["do_window_drill"]
         show_weekend_heat = _result_tools["show_weekend_heat"]
         show_search_history = _result_tools["show_search_history"]
+
+        _vis = bind_visuals_panel(state, visuals_host, set_why=lambda t="": set_why(t))
+        paint_visuals = _vis["paint_visuals"]
+        open_heat_dialog = _vis["open_heat_dialog"]
+        open_gantt_dialog = _vis["open_gantt_dialog"]
+        state["_paint_visuals"] = paint_visuals
 
         # Track last summary text for copy
         _orig_set_summary = set_summary
