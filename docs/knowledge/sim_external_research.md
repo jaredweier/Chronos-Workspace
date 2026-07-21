@@ -36,6 +36,21 @@ Coverage heat strip · gap board · open shift / callout · bid/preference captu
 | **P4** | Open-shift / bid bridge after implement — **landed** (`logic/ops_bridge.py`) |
 | **P5** | Pattern calendar preview + soft compliance strip — **landed** (`logic/pattern_preview.py`) |
 
+## Wave 2 (research 2026-07-21) — next build backlog
+
+Full write-up: **`docs/knowledge/sim_research_wave2.md`**
+
+| Tier | Theme |
+|------|--------|
+| **P6** | Pareto shortlist among hard-OK (min N / min OT / max fairness labels) |
+| **P7** | Counterfactual unlock cards + soft rank delta vs #2 *(recommended next build)* |
+| **P8** | Fatigue advisory soft metrics (LE wellness literature — optional weights) |
+| **P8b** | Multi-period FLSA soft meters (7/14/28) — legal threshold honesty |
+| **P9** | Richer CP-SAT seed soft objective (seeds only; 56d sim still truth) |
+| **P10** | Sticky what-if sandbox (cheap strip + predicted unlock, no full sim) |
+
+Suggested order: **P7 → P6 → P8b → P8 → P10 → P9**.
+
 ## Non-goals
 
 - Re-monolith `staffing_optimizer.py`
