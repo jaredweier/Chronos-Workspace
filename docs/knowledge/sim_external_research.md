@@ -49,7 +49,11 @@ Full write-up: **`docs/knowledge/sim_research_wave2.md`**
 | **P9** | CP-SAT seed pattern equity soft term — **landed** (`staffing_cpsat`) |
 | **P10** | Sticky what-if sandbox — **landed** (Find Best step expansion) |
 
-Hub: `logic/sim_wave2.py`.
+Hub: `logic/sim_wave2.py` (landed `19e8e64`).
+
+## Wave 3 deep dive (post P6–P10)
+
+**`docs/knowledge/sim_research_wave3_deep_dive.md`** — competitive (TeleStaff / First Due / Aladtec), MUS/MCS explainability, true multi-objective, LE fatigue, horizon **P11–P18**.
 
 ## Non-goals
 
