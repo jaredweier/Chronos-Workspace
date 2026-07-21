@@ -281,6 +281,18 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
             set_action_log("Publish Failed: No Plan In Memory.", ok=False)
             return
         start_date = (impl_date.value or "").strip()
+        # P4 readiness gate (blocking items only)
+        try:
+            from logic.ops_bridge import format_readiness_lines, publish_readiness_checklist
+
+            chk = publish_readiness_checklist(res, cfg or current_config(), implement_date=start_date)
+            state["publish_readiness"] = chk
+            if not chk.get("ready"):
+                set_action_log("\n".join(format_readiness_lines(chk)), ok=False)
+                ui.notify(chk.get("summary") or "Not ready to publish", type="warning")
+                return
+        except Exception:
+            pass
         uid = (session.current_user() or {}).get("id")
         plan_cfg = cfg or current_config()
         plan_res = res
@@ -388,6 +400,65 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
             ui.notify(f"Bid Draft #{r.get('event_id')}", type="positive")
         else:
             set_action_log(f"Bid Failed\n{r.get('message')}", ok=False)
+
+    def preview_open_shift_callouts():
+        from logic.ops_bridge import suggest_open_shifts_from_sim
+
+        res = state.get("result") or state.get("opt_result") or {}
+        start = ""
+        try:
+            start = (impl_date.value or "").strip()
+        except Exception:
+            start = ""
+        r = suggest_open_shifts_from_sim(res, start_date=start, max_posts=12)
+        lines = [r.get("message") or "Open-shift preview"]
+        for c in (r.get("candidates") or [])[:12]:
+            lines.append(
+                f"  · {c.get('shift_date_display')} {c.get('shift_start')}–{c.get('shift_end')} "
+                f"short {c.get('shortfall')} ({c.get('on_band')}/{c.get('required')})"
+                + (" [high-risk]" if c.get("high_risk") else "")
+            )
+        set_action_log("\n".join(lines), ok=bool(r.get("candidates")))
+        ui.notify(r.get("message") or "Preview ready", type="info")
+
+    def post_open_shift_callouts():
+        from logic.ops_bridge import seed_open_shifts_from_sim
+
+        res = state.get("result") or state.get("opt_result") or {}
+        start = ""
+        try:
+            start = (impl_date.value or "").strip()
+        except Exception:
+            start = ""
+        uid = (session.current_user() or {}).get("id")
+        r = seed_open_shifts_from_sim(res, start_date=start, max_posts=8, user_id=uid, dry_run=False)
+        set_action_log(
+            (r.get("message") or "")
+            + "\n"
+            + "\n".join(
+                f"  #{x.get('shift_id')} {x.get('shift_date_display')} {x.get('shift_start')}"
+                for x in (r.get("created") or [])[:8]
+            ),
+            ok=bool(r.get("created")),
+        )
+        ui.notify(r.get("message") or "Posted", type="positive" if r.get("created") else "warning")
+
+    def import_bid_prefs_to_soft():
+        from logic.ops_bridge import soft_prefs_from_bid_rankings
+        from logic.soft_rank import default_soft_prefs
+
+        base = state.get("soft_prefs") or default_soft_prefs()
+        r = soft_prefs_from_bid_rankings(base_prefs=base)
+        if r.get("success"):
+            state["soft_prefs"] = r.get("soft_prefs") or base
+            set_action_log(
+                f"Bid → soft prefs OK (event #{r.get('event_id')})\n{r.get('message')}",
+                ok=True,
+            )
+            ui.notify(r.get("message") or "Soft prefs updated", type="positive")
+        else:
+            set_action_log(f"Bid prefs import failed\n{r.get('message')}", ok=False)
+            ui.notify(r.get("message") or "No bids", type="warning")
 
     def export_options():
         ranked = state.get("ranked") or []
@@ -668,6 +739,9 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         "preview_publish": preview_publish,
         "export_csv": export_csv,
         "bid_from_sim": bid_from_sim,
+        "preview_open_shift_callouts": preview_open_shift_callouts,
+        "post_open_shift_callouts": post_open_shift_callouts,
+        "import_bid_prefs_to_soft": import_bid_prefs_to_soft,
         "export_options": export_options,
         "export_audit": export_audit,
         "run_diff_ab": run_diff_ab,

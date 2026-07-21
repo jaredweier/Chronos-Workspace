@@ -1187,6 +1187,9 @@ def render_simulator() -> None:
         preview_publish = _sa["preview_publish"]
         export_csv = _sa["export_csv"]
         bid_from_sim = _sa["bid_from_sim"]
+        preview_open_shift_callouts = _sa["preview_open_shift_callouts"]
+        post_open_shift_callouts = _sa["post_open_shift_callouts"]
+        import_bid_prefs_to_soft = _sa["import_bid_prefs_to_soft"]
         export_options = _sa["export_options"]
         export_audit = _sa["export_audit"]
         run_diff_ab = _sa["run_diff_ab"]
@@ -1377,6 +1380,18 @@ def render_simulator() -> None:
         btn_csv.on_click(export_csv)
         if btn_bid is not None:
             btn_bid.on_click(bid_from_sim)
+        # P4 ops bridge buttons on publish step
+        if _pub.get("btn_seed_open") is not None:
+            _pub["btn_seed_open"].on_click(preview_open_shift_callouts)
+        if _pub.get("btn_post_open") is not None:
+            _pub["btn_post_open"].on_click(post_open_shift_callouts)
+        if _pub.get("btn_import_bid_prefs") is not None:
+            _pub["btn_import_bid_prefs"].on_click(import_bid_prefs_to_soft)
+        if callable(_pub.get("refresh_readiness")):
+            try:
+                _pub["refresh_readiness"]()
+            except Exception:
+                pass
 
         go_step(1)
 

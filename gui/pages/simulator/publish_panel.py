@@ -4,6 +4,7 @@ from gui import session
 from gui.pages.simulator.helpers import _HINT
 from gui.shell import panel
 from logic import recommend_implement_dates
+from logic.ops_bridge import publish_readiness_checklist
 from logic.staffing_insights import recommend_pay_period_preview
 from validators import format_date
 
@@ -20,6 +21,42 @@ def render_publish_panel(state: dict, go_step_cb) -> tuple[ui.element, dict]:
             ui.label(
                 "Apply the selected coverage option as a monthly schedule. Preview first if you want a dry run."
             ).style(_HINT)
+
+        # P4 — publish readiness (blocking vs warn)
+        readiness_host = ui.element("div").classes("w-full q-mb-sm")
+        elements["readiness_host"] = readiness_host
+
+        def refresh_readiness():
+            res = state.get("result") or state.get("opt_result") or {}
+            cfg = state.get("config") or state.get("last_config") or {}
+            date_val = ""
+            try:
+                date_val = (elements.get("impl_date").value or "") if elements.get("impl_date") else ""
+            except Exception:
+                date_val = ""
+            chk = publish_readiness_checklist(res, cfg, implement_date=date_val)
+            state["publish_readiness"] = chk
+            readiness_host.clear()
+            with readiness_host:
+                color = "#86efac" if chk.get("ready") else "#fca5a5"
+                ui.label(f"Publish readiness: {chk.get('summary')}").style(
+                    f"font-weight:700;color:{color};margin-bottom:6px"
+                )
+                for it in chk.get("items") or []:
+                    if it.get("ok"):
+                        c = "#86efac"
+                        mark = "✓"
+                    elif it.get("blocking"):
+                        c = "#fca5a5"
+                        mark = "✕"
+                    else:
+                        c = "#FDE68A"
+                        mark = "!"
+                    det = f" — {it['detail']}" if it.get("detail") else ""
+                    ui.label(f"{mark} {it.get('label')}{det}").style(f"color:{c};font-size:0.85rem;margin-top:2px")
+
+        elements["refresh_readiness"] = refresh_readiness
+
         with panel("Publish as monthly schedule"):
             rec = recommend_implement_dates()
             rec_raw = rec.get("recommended_date") or ""
@@ -32,6 +69,10 @@ def render_publish_panel(state: dict, go_step_cb) -> tuple[ui.element, dict]:
             )
             impl_date = ui.input(label="Implement start date (M/D/YY)", value=rec_date).classes("w-full")
             elements["impl_date"] = impl_date
+            try:
+                impl_date.on_value_change(lambda e: refresh_readiness())
+            except Exception:
+                pass
 
             with ui.row().classes("gap-2 flex-wrap q-mt-sm"):
                 for opt in rec.get("options") or []:
@@ -46,12 +87,33 @@ def render_publish_panel(state: dict, go_step_cb) -> tuple[ui.element, dict]:
 
                     def _pick(date_val=d_disp):
                         impl_date.value = date_val
+                        refresh_readiness()
 
                     ui.button(lab, on_click=_pick).classes("btn-ghost").props("no-caps outline dense")
 
             elements["apply_officers"] = ui.checkbox("Update officer home shifts from plan", value=False)
             elements["force_regen"] = ui.checkbox("Regenerate monthly if already published", value=True)
             elements["save_defaults"] = ui.checkbox("Save as schedule builder defaults", value=True)
+
+        with panel("Ops bridge (after plan)"):
+            ui.label("Callouts and bids use the loaded plan — soft prefs only; never change hard feasibility.").style(
+                _HINT
+            )
+            with ui.row().classes("gap-2 flex-wrap q-mt-sm"):
+                elements["btn_refresh_ready"] = (
+                    ui.button("Refresh readiness", on_click=refresh_readiness)
+                    .classes("btn-ghost")
+                    .props("no-caps outline dense")
+                )
+                elements["btn_seed_open"] = (
+                    ui.button("Preview open-shift callouts").classes("btn-ghost").props("no-caps outline dense")
+                )
+                elements["btn_post_open"] = (
+                    ui.button("Post open-shift callouts").classes("btn-ghost").props("no-caps outline dense")
+                )
+                elements["btn_import_bid_prefs"] = (
+                    ui.button("Import bid prefs → soft rank").classes("btn-ghost").props("no-caps outline dense")
+                )
 
         ui.html(
             '<div class="sim-section-title" style="margin-top:12px">Action log</div>',
