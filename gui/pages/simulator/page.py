@@ -24,6 +24,7 @@ from gui.pages.simulator.helpers import (
 from gui.pages.simulator.kpi_panel import paint_simulator_kpis
 from gui.pages.simulator.manual_editor import render_manual_editor
 from gui.pages.simulator.optimizer_actions import bind_optimizer_actions
+from gui.pages.simulator.pattern_preview_ui import bind_pattern_preview
 from gui.pages.simulator.publish_panel import render_publish_panel
 from gui.pages.simulator.ranked_render import bind_ranked_render
 from gui.pages.simulator.requirements_form import render_requirements_form
@@ -372,6 +373,9 @@ def render_simulator() -> None:
                         ui.notify("Soft prefs reset to defaults", type="info"),
                     ),
                 ).classes("btn-ghost").props("no-caps outline dense")
+
+            # P5 — pattern calendar + soft compliance (Vertex42 / WFM strip)
+            pattern_preview_host = ui.element("div").classes("w-full q-mt-sm")
 
             def set_space_warn(text: str, *, risk: str = "low"):
                 space_warn.clear()
@@ -1232,6 +1236,22 @@ def render_simulator() -> None:
         open_heat_dialog = _vis["open_heat_dialog"]
         open_gantt_dialog = _vis["open_gantt_dialog"]
         state["_paint_visuals"] = paint_visuals
+
+        _pp = bind_pattern_preview(
+            state,
+            pattern_preview_host,
+            form_payload=lambda: _form_payload(),
+            get_variations=lambda: (variations.value or "") if use_style.value else "",
+            get_style=lambda: "rotating" if str(rot_style.value or "").lower().startswith("rotat") else "fixed",
+        )
+        paint_pattern_preview = _pp["paint"]
+        try:
+            variations.on_value_change(lambda e: paint_pattern_preview())
+            length.on_value_change(lambda e: paint_pattern_preview())
+            annual.on_value_change(lambda e: paint_pattern_preview())
+            paint_pattern_preview()
+        except Exception:
+            pass
 
         # Track last summary text for copy
         _orig_set_summary = set_summary
