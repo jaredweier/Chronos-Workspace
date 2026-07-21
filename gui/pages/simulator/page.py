@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from config import SIMULATOR_ROTATION_TYPES
 from gui import session
 from gui.pages.simulator.constraint_suggest_ui import bind_constraint_suggest
 from gui.pages.simulator.form_logic import (
@@ -48,6 +49,8 @@ from logic.plan_explain import explain_ranked_option
 
 
 def render_simulator() -> None:
+    _placeholder_rot = SIMULATOR_ROTATION_TYPES[0] if SIMULATOR_ROTATION_TYPES else ""
+
     def body() -> None:
         apply_simulator_css(ui)
         if not session.can("simulator.use"):
@@ -208,7 +211,6 @@ def render_simulator() -> None:
             btn_q_min = _req["btn_q_min"]
             btn_q_will = _req["btn_q_will"]
             btn_q_plus = _req["btn_q_plus"]
-            req_stepper = _req["req_stepper"]
             _refresh_lock_progress = _req["refresh_lock_progress"]
 
         # ── Step 2 ─────────────────────────────────────────────────────────
@@ -1065,7 +1067,6 @@ def render_simulator() -> None:
         _form_payload = _fs["form_payload"]
         _apply_form_payload = _fs["apply_form_payload"]
         _push_undo = _fs["push_undo"]
-        undo_form = _fs["undo_form"]
         _persist_form = _fs["persist_form"]
         _restore_form = _fs["restore_form"]
 
@@ -1108,6 +1109,9 @@ def render_simulator() -> None:
                 "go_step": go_step,
                 "render_ranked": _render_ranked,
                 "show_no_match_dialog": _show_no_match_dialog,
+                "rotation": rotation,
+                "use_windows": use_windows,
+                "constraint_context": _constraint_context,
             },
         )
         run_sim = _sa["run_sim"]

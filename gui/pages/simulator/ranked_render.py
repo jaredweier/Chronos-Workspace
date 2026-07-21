@@ -42,7 +42,6 @@ def bind_ranked_render(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
     cov247 = c.get("cov247")
     baseline_kwargs = c["baseline_kwargs"]
     current_config = c["current_config"]
-    human_metrics = c["human_metrics"]
     paint_kpis = c["paint_kpis"]
     constraint_context = c["constraint_context"]
     persist_form = c["persist_form"]
@@ -59,7 +58,6 @@ def bind_ranked_render(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
     en_len = c.get("en_len") or (lambda on: set_enabled([length], on))
     en_ann = c.get("en_ann") or (lambda on: set_enabled([annual], on) if annual is not None else None)
     refresh_win_list = c.get("refresh_win_list") or (lambda: None)
-    parse_starts = c.get("parse_starts") or (lambda: [])
     nums = c.get("nums") or (lambda: (None, None, None, None, None, None, None, None))
     mode_label = c.get("mode_label")
 
@@ -122,7 +120,7 @@ def bind_ranked_render(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
             build_decision_table(
                 decision_host,
                 list(state.get("ranked") or []),
-                on_load=_load_option,
+                on_load=load_option,
                 annual_target=an,
                 flsa_period_days=int(fd or 28),
                 on_stress_test=lambda: asyncio.create_task(run_stress_test()),

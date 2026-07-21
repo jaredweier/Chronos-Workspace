@@ -428,7 +428,7 @@ def _balance_day_assignments(
     afternoon = [i for i in range(k) if 12 <= _hour(i) < 18]
     evening = [i for i in range(k) if 18 <= _hour(i) < 22]
     night = [i for i in range(k) if _hour(i) >= 22 or _hour(i) < 6]
-    morning = [i for i in range(k) if i not in afternoon and i not in evening and i not in night]
+    _morning = [i for i in range(k) if i not in afternoon and i not in evening and i not in night]  # noqa: F841 — band partition reserved
 
     # Window samples → covering bands (continuous min occupancy, not just union hits).
     # Each sample carries its own need (supports multiple windows same day).
@@ -2181,17 +2181,18 @@ def _simulate_schedule_fixed_n(config: SimulatorConfig) -> SimulatorResult:
                     gap_counter[(day_offset, "total")] = gap_counter.get((day_offset, "total"), 0) + gap
                     total_gap_hours += gap * config.shift_length_hours
 
-        # High-risk night: shortfalls only on night starts that ran today
+        # High-risk night (Fri/Sat): score configured night starts vs night_minimum.
+        # Include empty bands (c==0) — missing night coverage is a risk gap.
         if high_risk and config.night_minimum and config.night_minimum > 0:
-            for st, count in used_counts.items():
-                if not _is_night_shift_start(st):
-                    continue
-                c = int(count)
-                if c <= 0:
-                    continue
-                required = int(config.night_minimum)
-                if config.apply_department_rules:
-                    required = max(required, int(config.min_per_shift or 0))
+            required = int(config.night_minimum)
+            if config.apply_department_rules:
+                required = max(required, int(config.min_per_shift or 0))
+            night_starts = [st for st in (config.shift_starts or []) if _is_night_shift_start(st)]
+            if not night_starts:
+                # Fall back to whatever night keys actually ran
+                night_starts = [st for st in used_counts if _is_night_shift_start(st)]
+            for st in night_starts:
+                c = int(used_counts.get(st, 0))
                 if c < required:
                     night_risk_gaps += 1
 
@@ -2571,14 +2572,18 @@ def _enrich_rust_sim_metrics(
     gap_events = int(metrics.get("gap_events", 0))
     total_gap_hours = gap_events * config.shift_length_hours
     night_risk_gaps = 0
+    nmin = int(getattr(config, "night_minimum", 0) or 0)
+    night_starts = [st for st in (config.shift_starts or []) if _is_night_shift_start(st)]
     for day in coverage_by_day:
-        if not day.get("high_risk_night"):
+        if not day.get("high_risk_night") or nmin <= 0:
             continue
-        shift_counts = day.get("shift_counts", {})
-        for shift_start, count in shift_counts.items():
-            required = config.min_per_shift
-            if config.apply_department_rules and _is_night_shift_start(shift_start):
-                required = max(required, config.night_minimum)
+        shift_counts = day.get("shift_counts", {}) or {}
+        required = nmin
+        if config.apply_department_rules:
+            required = max(required, int(config.min_per_shift or 0))
+        starts = night_starts or [st for st in shift_counts if _is_night_shift_start(st)]
+        for shift_start in starts:
+            count = int(shift_counts.get(shift_start, 0))
             if count < required:
                 night_risk_gaps += 1
 

@@ -26,6 +26,11 @@ SCHEDULING_RULES.md
 SCHEDULING_RULES.txt
 tests/ui_snapshots/baseline/
 tests/ui_live_test/
+# Large domain tests — run by name, not whole-file thrash
+tests/test_simulator_constraints.py
+logic/staffing_opt_search.py
+logic/staffing_opt_packs.py
+logic/staffing_opt_domain.py
 logs/ui_review/
 logs/ui_live_test/
 rust/

@@ -118,9 +118,11 @@ class SimulatorConstraintsTests(unittest.TestCase):
         """High-risk nights with thin night bands must increment night_risk_gaps."""
         from simulator import SimulatorConfig, simulate_schedule
 
+        # N=5 cannot always staff night_minimum=2 on every Fri/Sat night band.
+        # (N=6 often fills high-risk nights → metric 0; that is success, not a bug.)
         cfg = SimulatorConfig(
             rotation_type="2-2-3 (14-day)",
-            num_officers=6,
+            num_officers=5,
             shift_length_hours=8.0,
             annual_hours_target=2008,
             shift_starts=["06:00", "14:00", "22:00"],

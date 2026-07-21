@@ -40,8 +40,6 @@ def bind_optimizer_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable
     rotation = c["rotation"]
     use_min_ps = c["use_min_ps"]
     use_annual = c["use_annual"]
-    annual = c["annual"]
-    annual_var = c["annual_var"]
     use_247 = c["use_247"]
     use_start_date = c["use_start_date"]
     sim_start_date = c["sim_start_date"]

@@ -985,7 +985,6 @@ def _cheap_window_minute_fail(
     from simulator import assign_pack_starts_for_coverage
 
     hops = max(0, int(nearby_hops if nearby_hops is not None else 1))
-    need_any_day = any(w.weekday is None and w.specific_date is None for w in win_objs)
     weekdays: set = set()
     for w in win_objs:
         wset = w.weekday_set()
@@ -1014,7 +1013,6 @@ def _cheap_window_minute_fail(
 
     for day_offset in range(n_days):
         day = sim_start + timedelta(days=day_offset)
-        wd = day.weekday()
         # Always build duty seats so overnight handoff stays continuous even on
         # non-window weekdays (skipping would drop prior tails into window days).
         day_wins = [w for w in win_objs if w.matches_date(day)]

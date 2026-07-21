@@ -13,6 +13,7 @@ from logic import (
     get_last_optimized_plan,
     implement_optimized_plan,
     preview_implement_plan,
+    recommend_implement_dates,
     save_last_optimized_plan,
     save_simulator_scenario,
 )
@@ -26,6 +27,7 @@ from logic.optimizer_features import (
     fairness_report_with_roster,
     format_share_message,
     load_form_snapshot,
+    option_seed_from_row,
     pin_option,
     save_scenario_slot,
 )
@@ -40,7 +42,7 @@ from logic.sim_product_pack import (
     sensitivity_relax_night_min,
     try_cpsat_when_small,
 )
-from logic.staffing_insights import export_staffing_memo
+from logic.staffing_insights import detect_constraint_conflicts, export_staffing_memo
 
 
 def can_reuse_find_best_for_generate(state: dict) -> bool:
@@ -94,6 +96,9 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
     variations = c["variations"]
     use_style = c["use_style"]
     go_step = c["go_step"]
+    rotation = c["rotation"]
+    use_windows = c["use_windows"]
+    constraint_context = c["constraint_context"]
 
     def run_sim():
         """Generate schedule. Seamless after Find Best: use loaded plan (no re-lock)."""
@@ -648,7 +653,7 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
             result=state.get("result"),
             config=state.get("config"),
             ranked=state.get("ranked") or ((state.get("opt_result") or {}).get("ranked")),
-            conflicts=detect_constraint_conflicts(_constraint_context()),
+            conflicts=detect_constraint_conflicts(constraint_context()),
         )
         if r.get("success"):
             set_summary((r.get("text") or "")[:4000])
