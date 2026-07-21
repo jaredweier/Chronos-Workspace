@@ -55,7 +55,7 @@ jobs:
       - run: python dev.py build-rust
       - run: python -c "from logic import rust_bridge; assert rust_bridge.backend_name()=='rust'"
       - run: python scripts/build_portable.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Dodgeville_PD_Portable
           path: |
