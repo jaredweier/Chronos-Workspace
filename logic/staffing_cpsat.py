@@ -262,8 +262,29 @@ def optimize_joint_phase_pattern(
         min_win = model.NewConstant(0)
 
     sum_cover = sum(cover_vars)
-    # Lex-ish: min_all primary, window secondary, sum tertiary
-    model.Maximize(min_all * 1_000_000 + min_win * 1_000 + sum_cover)
+    # Lex-ish hard floors first; soft: coverage sum + pattern-map equity (P9)
+    # Imbalance penalty only when free pattern map (never overrides hard floors).
+    soft_equity = model.NewConstant(0)
+    if pat_vars is not None and n_pat >= 2:
+        max_pc = model.NewIntVar(0, n, "max_pc")
+        min_pc = model.NewIntVar(0, n, "min_pc")
+        model.Add(min_pc <= max_pc)
+        for k in range(n_pat):
+            bits = []
+            for i in range(n):
+                b = model.NewBoolVar(f"is_pat_{i}_{k}")
+                model.Add(pat_vars[i] == k).OnlyEnforceIf(b)
+                model.Add(pat_vars[i] != k).OnlyEnforceIf(b.Not())
+                bits.append(b)
+            cnt = model.NewIntVar(0, n, f"pat_cnt_{k}")
+            model.Add(cnt == sum(bits))
+            model.Add(max_pc >= cnt)
+            model.Add(min_pc <= cnt)
+        imb = model.NewIntVar(0, n, "pat_imb")
+        model.Add(imb == max_pc - min_pc)
+        soft_equity = imb
+    # Maximize: min_all >> min_win >> sum_cover; soft subtract pattern imbalance
+    model.Maximize(min_all * 1_000_000 + min_win * 1_000 + sum_cover * 10 - soft_equity * 50)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit_sec)

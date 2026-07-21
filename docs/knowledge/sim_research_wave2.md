@@ -135,6 +135,12 @@
 **P7 → P6 → P8b → P8 → P10 → P9**
 (Explain trust first, then choice UI, then LE soft meters, then interactive sandbox, then heavier solver seeds.)
 
+### Build status
+
+| Tier | Status | Code |
+|------|--------|------|
+| P6–P10 | **landed** | `logic/sim_wave2.py` + optimizer / UI / CP-SAT equity wires |
+
 ---
 
 ## Explicit non-goals (wave 2)

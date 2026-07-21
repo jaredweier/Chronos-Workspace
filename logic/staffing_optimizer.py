@@ -4060,6 +4060,7 @@ def optimize_staffing_scenarios(
     # Soft rank among hard-OK only (prefs never override hard feasibility)
     soft_msg = None
     soft_prefs_used = None
+    wave2_meta: Dict = {}
     try:
         from logic.soft_rank import rank_soft_among_feasible
 
@@ -4075,6 +4076,32 @@ def optimize_staffing_scenarios(
     except Exception:
         soft_msg = None
         soft_prefs_used = None
+
+    # Wave 2: Pareto labels, fatigue, FLSA meters, counterfactuals, rank delta
+    try:
+        from logic.sim_wave2 import enrich_wave2_result
+
+        _w2 = enrich_wave2_result(
+            {"ranked": results, "near_misses": near_misses, "success": bool(results)},
+            {
+                "officers": (axes.get("officer_counts") or [None])[0],
+                "cov247": cov247,
+                "windows": windows if use_extra_windows else [],
+            },
+        )
+        if _w2.get("ranked"):
+            results = [r for r in _w2["ranked"] if r.get("hard_constraints_ok")] or list(_w2["ranked"])
+        wave2_meta = {
+            "soft_rank_delta": _w2.get("soft_rank_delta"),
+            "counterfactual_unlocks": _w2.get("counterfactual_unlocks") or [],
+            "pareto_champions": _w2.get("pareto_champions") or {},
+        }
+        if _w2.get("message") and soft_msg and "Pareto" in str(_w2.get("message")):
+            soft_msg = _w2["message"]
+        elif _w2.get("soft_rank_delta"):
+            soft_msg = (soft_msg + " · " if soft_msg else "") + str(_w2["soft_rank_delta"])
+    except Exception:
+        wave2_meta = {}
 
     wall_ms = int((time.perf_counter() - t0) * 1000)
     total_eval = cheap_evals
@@ -4178,7 +4205,11 @@ def optimize_staffing_scenarios(
         "soft_rank": {
             "applied": bool(soft_prefs_used and best and best.get("hard_constraints_ok")),
             "message": soft_msg,
+            "delta": (wave2_meta or {}).get("soft_rank_delta"),
         },
+        "soft_rank_delta": (wave2_meta or {}).get("soft_rank_delta"),
+        "counterfactual_unlocks": (wave2_meta or {}).get("counterfactual_unlocks") or [],
+        "pareto_champions": (wave2_meta or {}).get("pareto_champions") or {},
         "near_misses": near_misses,
         "best": best_out,
         "ranked": ranked,

@@ -345,6 +345,7 @@ def render_simulator() -> None:
                         ("lower_ot", "Prefer lower est. OT"),
                         ("lower_annual_spread", "Lower annual hours spread"),
                         ("prefer_night_starts", "Prefer packs with night starts"),
+                        ("lower_fatigue", "Lower fatigue advisory (soft)"),
                     ):
                         with ui.row().classes("gap-2 items-center flex-wrap"):
                             ui.label(slabel).style("color:#D6E6FF;min-width:12rem")
@@ -376,6 +377,60 @@ def render_simulator() -> None:
 
             # P5 — pattern calendar + soft compliance (Vertex42 / WFM strip)
             pattern_preview_host = ui.element("div").classes("w-full q-mt-sm")
+
+            # P10 — sticky what-if sandbox (cheap strip only)
+            whatif_host = ui.element("div").classes("w-full q-mt-sm")
+            with whatif_host:
+                with ui.expansion("What-if sandbox (no full sim)", icon="science").classes("w-full sim-adv"):
+                    ui.label(
+                        "Adjust N / window min / 24/7 and re-run the cheap feasibility strip. "
+                        "Does not prove hard-OK — Find Best still required."
+                    ).style(_HINT)
+                    with ui.row().classes("gap-2 flex-wrap items-center"):
+                        whatif_dn = ui.number(label="Δ officers", value=0, min=-5, max=10, step=1).classes("w-28")
+                        whatif_dw = ui.number(label="Δ window min", value=0, min=-2, max=2, step=1).classes("w-28")
+                        whatif_d247 = ui.number(label="Δ 24/7", value=0, min=-2, max=2, step=1).classes("w-28")
+                    whatif_out = ui.element("div").classes("w-full q-mt-sm")
+
+                    def _run_whatif_sandbox():
+                        from logic.sim_wave2 import whatif_sandbox
+
+                        form = {}
+                        try:
+                            form = _form_payload() if callable(_form_payload) else {}
+                        except Exception:
+                            form = {}
+                        # Merge live numbers when payload thin
+                        try:
+                            if use_officers.value and officers.value:
+                                form["officers"] = int(float(str(officers.value).strip() or 0))
+                                form["num_officers"] = form["officers"]
+                            if use_247.value and cov247.value is not None:
+                                form["cov247"] = int(float(str(cov247.value).strip() or 0))
+                                form["coverage_247"] = form["cov247"]
+                        except Exception:
+                            pass
+                        r = whatif_sandbox(
+                            form,
+                            delta_n=int(whatif_dn.value or 0),
+                            delta_window_min=int(whatif_dw.value or 0),
+                            delta_247=int(whatif_d247.value or 0),
+                        )
+                        state["whatif"] = r
+                        whatif_out.clear()
+                        with whatif_out:
+                            ui.label(r.get("narrative") or "").style("color:#FDE68A;font-weight:600")
+                            if r.get("predicted_unlock"):
+                                ui.label(f"Predicted unlock: {r['predicted_unlock']}").style(
+                                    "color:#86efac;margin-top:4px"
+                                )
+                            strip = r.get("strip") or {}
+                            for ln in strip.get("lines") or []:
+                                ui.label(f"· {ln}").style("color:#D6E6FF;font-size:0.85rem;margin-top:2px")
+
+                    ui.button("Run what-if", on_click=_run_whatif_sandbox).classes("btn-primary q-mt-sm").props(
+                        "no-caps unelevated dense"
+                    )
 
             def set_space_warn(text: str, *, risk: str = "low"):
                 space_warn.clear()

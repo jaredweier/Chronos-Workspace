@@ -107,6 +107,25 @@ def open_no_match_dialog(
         except Exception:
             pass
 
+        # P7 counterfactual unlocks
+        try:
+            from logic.sim_wave2 import counterfactual_unlocks
+
+            unlocks = (opt_result or {}).get("counterfactual_unlocks") or counterfactual_unlocks(
+                opt_result or {}, config or {}
+            )
+            if unlocks:
+                ui.label("What would unlock a hard match?").style("color:#86efac;font-weight:700;margin-top:10px")
+                for u in unlocks[:4]:
+                    mark = "likely" if u.get("estimated_unlock") else "try"
+                    ui.label(f"[{mark}] {u.get('action')}").style("color:#E8EDF4;font-size:0.88rem;margin-top:4px")
+                    if u.get("why"):
+                        ui.label(str(u["why"])).style(
+                            "color:#9AABC4;font-size:0.8rem;margin-left:12px;margin-bottom:4px"
+                        )
+        except Exception:
+            pass
+
         sugs: list = []
         try:
             from logic.optimizer_features import suggest_relaxations

@@ -79,8 +79,28 @@ def build_decision_table(
         ("Est. OT hours", lambda r: econ(r, "est_ot_hours_total"), "min"),
         ("Fairness score", lambda r: econ(r, "fairness_score"), "max"),
         ("Soft score", lambda r: r.get("soft_score"), "max"),
-        ("FLSA period load", lambda r: econ(r, "flsa_period_pct"), None),
-        ("Fatigue score", lambda r: (option_fatigue_score(r) or {}).get("score"), "max"),
+        ("Pareto", lambda r: r.get("pareto_note") or "—", None),
+        ("FLSA 28d load", lambda r: econ(r, "flsa_period_pct"), None),
+        (
+            "FLSA 7/14/28d",
+            lambda r: (
+                " · ".join(
+                    f"{m.get('label')}:{m.get('pct'):.0f}%"
+                    for m in (r.get("flsa_period_meters") or econ(r, "flsa_period_meters") or [])[:3]
+                )
+                or "—"
+            ),
+            None,
+        ),
+        (
+            "Fatigue advisory",
+            lambda r: (
+                r.get("fatigue_score")
+                if r.get("fatigue_score") is not None
+                else (option_fatigue_score(r) or {}).get("score")
+            ),
+            "max",
+        ),
     ]
 
     stress = stress_results or {}

@@ -18,6 +18,7 @@ DEFAULT_SOFT_PREFS: Dict[str, float] = {
     "lower_ot": 0.7,  # lower est OT hours/cost
     "lower_annual_spread": 1.0,  # smaller hours range across roster
     "prefer_night_starts": 0.0,  # optional: reward packs with night bands
+    "lower_fatigue": 0.5,  # P8 LE wellness advisory (soft)
 }
 
 
@@ -189,6 +190,15 @@ def soft_components(
     # fairness_score from economics if present
     fair = _f(econ.get("fairness_score") or (row.get("human_metrics") or {}).get("fairness_score"), 50.0)
 
+    # P8 fatigue advisory (soft)
+    try:
+        from logic.sim_wave2 import fatigue_advisory
+
+        fat = fatigue_advisory(row if hard is not False else row)
+        lower_fatigue = _f(fat.get("fatigue_score"), 50.0)
+    except Exception:
+        lower_fatigue = _f(row.get("fatigue_score"), 50.0)
+
     comps = {
         "hard_gate": 100.0 if hard is not False else 0.0,
         "balance_nights": bal_n,
@@ -197,6 +207,7 @@ def soft_components(
         "lower_ot": lower_ot,
         "lower_annual_spread": lower_spread,
         "prefer_night_starts": prefer_night,
+        "lower_fatigue": lower_fatigue,
         "fairness_proxy": fair,
     }
     # Weighted total (ignore hard_gate in sum — already filtered)

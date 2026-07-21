@@ -42,14 +42,14 @@ Full write-up: **`docs/knowledge/sim_research_wave2.md`**
 
 | Tier | Theme |
 |------|--------|
-| **P6** | Pareto shortlist among hard-OK (min N / min OT / max fairness labels) |
-| **P7** | Counterfactual unlock cards + soft rank delta vs #2 *(recommended next build)* |
-| **P8** | Fatigue advisory soft metrics (LE wellness literature — optional weights) |
-| **P8b** | Multi-period FLSA soft meters (7/14/28) — legal threshold honesty |
-| **P9** | Richer CP-SAT seed soft objective (seeds only; 56d sim still truth) |
-| **P10** | Sticky what-if sandbox (cheap strip + predicted unlock, no full sim) |
+| **P6** | Pareto shortlist among hard-OK — **landed** (`sim_wave2.annotate_pareto_shortlist`) |
+| **P7** | Counterfactual unlock + soft rank delta — **landed** |
+| **P8** | Fatigue advisory soft metrics — **landed** |
+| **P8b** | Multi-period FLSA soft meters (7/14/28) — **landed** |
+| **P9** | CP-SAT seed pattern equity soft term — **landed** (`staffing_cpsat`) |
+| **P10** | Sticky what-if sandbox — **landed** (Find Best step expansion) |
 
-Suggested order: **P7 → P6 → P8b → P8 → P10 → P9**.
+Hub: `logic/sim_wave2.py`.
 
 ## Non-goals
 

@@ -235,9 +235,23 @@ def explain_staffing_result(result: Optional[Dict[str, Any]] = None) -> List[str
             lines.append(
                 "Soft rank (among hard-OK): " + (best.get("soft_rank_note") or f"score {best.get('soft_score')}")
             )
+        if best.get("pareto_note"):
+            lines.append(f"Pareto: {best['pareto_note']}")
+        if best.get("fatigue_score") is not None:
+            lines.append(f"Fatigue advisory: {best.get('fatigue_score')}/100 (soft)")
+        delta = r.get("soft_rank_delta") or (r.get("soft_rank") or {}).get("delta")
+        if delta:
+            lines.append(str(delta))
         sr = r.get("soft_rank") or {}
         if sr.get("message") and sr.get("message") not in "\n".join(lines):
             lines.append(str(sr["message"]))
+    if r.get("impossible") or not r.get("success"):
+        unlocks = r.get("counterfactual_unlocks") or []
+        if unlocks:
+            lines.append("Counterfactual unlocks:")
+            for u in unlocks[:4]:
+                mark = "likely" if u.get("estimated_unlock") else "try"
+                lines.append(f"  [{mark}] {u.get('action')}")
     return lines
 
 
