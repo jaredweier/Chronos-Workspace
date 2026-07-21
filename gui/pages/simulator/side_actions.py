@@ -444,6 +444,7 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         ui.notify(r.get("message") or "Posted", type="positive" if r.get("created") else "warning")
 
     def import_bid_prefs_to_soft():
+        from logic.horizon_pack import bid_prefs_for_cpsat_seed
         from logic.ops_bridge import soft_prefs_from_bid_rankings
         from logic.soft_rank import default_soft_prefs
 
@@ -451,14 +452,52 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         r = soft_prefs_from_bid_rankings(base_prefs=base)
         if r.get("success"):
             state["soft_prefs"] = r.get("soft_prefs") or base
+            seed = bid_prefs_for_cpsat_seed(r.get("event_id"))
+            state["cpsat_seed_soft"] = seed
             set_action_log(
-                f"Bid → soft prefs OK (event #{r.get('event_id')})\n{r.get('message')}",
+                f"Bid → soft prefs OK (event #{r.get('event_id')})\n{r.get('message')}\n"
+                f"CP-SAT seed soft: equity={seed.get('w_pattern_equity')} night={seed.get('w_night_pref')}",
                 ok=True,
             )
             ui.notify(r.get("message") or "Soft prefs updated", type="positive")
         else:
             set_action_log(f"Bid prefs import failed\n{r.get('message')}", ok=False)
             ui.notify(r.get("message") or "No bids", type="warning")
+
+    def run_open_shift_deputy():
+        from logic.horizon_pack import open_shift_deputy_from_sim
+
+        res = state.get("result") or state.get("opt_result") or {}
+        start = ""
+        try:
+            start = (impl_date.value or "").strip()
+        except Exception:
+            start = ""
+        r = open_shift_deputy_from_sim(res, start_date=start, max_posts=8)
+        lines = [r.get("message") or "Deputy"]
+        for c in (r.get("candidates") or [])[:8]:
+            lines.append(
+                f"  score {c.get('deputy_score')}: {c.get('shift_date_display')} "
+                f"{c.get('shift_start')} short={c.get('shortfall')}" + (" [high-risk]" if c.get("high_risk") else "")
+            )
+        set_action_log("\n".join(lines), ok=bool(r.get("candidates")))
+        ui.notify(r.get("message") or "Deputy ready", type="info")
+
+    def run_scenario_stories():
+        from logic.horizon_pack import scenario_story_cards
+
+        form = {}
+        try:
+            form = form_payload() if callable(form_payload) else {}
+        except Exception:
+            form = {}
+        r = scenario_story_cards(form)
+        lines = [r.get("message") or "Stories"]
+        for c in r.get("cards") or []:
+            lines.append(f"· {c.get('title')}: {c.get('story')}")
+        set_summary("\n".join(lines))
+        set_action_log("\n".join(lines), ok=True)
+        ui.notify("Scenario stories in summary", type="info")
 
     def export_options():
         ranked = state.get("ranked") or []
@@ -742,6 +781,8 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         "preview_open_shift_callouts": preview_open_shift_callouts,
         "post_open_shift_callouts": post_open_shift_callouts,
         "import_bid_prefs_to_soft": import_bid_prefs_to_soft,
+        "run_open_shift_deputy": run_open_shift_deputy,
+        "run_scenario_stories": run_scenario_stories,
         "export_options": export_options,
         "export_audit": export_audit,
         "run_diff_ab": run_diff_ab,

@@ -252,6 +252,24 @@ def explain_staffing_result(result: Optional[Dict[str, Any]] = None) -> List[str
             for u in unlocks[:4]:
                 mark = "likely" if u.get("estimated_unlock") else "try"
                 lines.append(f"  [{mark}] {u.get('action')}")
+        cr = r.get("conflict_report") or {}
+        if cr.get("conflicts"):
+            lines.append("Structured conflicts:")
+            for c in cr["conflicts"][:5]:
+                lines.append(f"  [{c.get('id')}] {c.get('label')} — {c.get('fix')}")
+    nd = r.get("non_dominated_shortlist") or {}
+    if nd.get("chips"):
+        lines.append(nd.get("message") or "Non-dominated shortlist:")
+        for ch in nd["chips"][:4]:
+            labs = ", ".join(ch.get("labels") or []) or "trade-off"
+            lines.append(f"  #{ch.get('rank')} N={ch.get('n')} OT~{ch.get('ot')} · {labs}")
+    bridge = r.get("ot_flsa_bridge") or {}
+    if bridge.get("sim_flsa_meters"):
+        lines.append("FLSA soft meters (legal thresholds):")
+        for m in bridge["sim_flsa_meters"][:3]:
+            lines.append(f"  {m.get('detail')}")
+        if (bridge.get("live_ot") or {}).get("message"):
+            lines.append(f"  Live: {bridge['live_ot']['message']}")
     return lines
 
 

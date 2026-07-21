@@ -4077,11 +4077,11 @@ def optimize_staffing_scenarios(
         soft_msg = None
         soft_prefs_used = None
 
-    # Wave 2: Pareto labels, fatigue, FLSA meters, counterfactuals, rank delta
+    # Wave 2+3: Pareto, fatigue, FLSA, counterfactuals, non-dominated, conflicts
     try:
-        from logic.sim_wave2 import enrich_wave2_result
+        from logic.horizon_pack import enrich_horizon_result
 
-        _w2 = enrich_wave2_result(
+        _w2 = enrich_horizon_result(
             {"ranked": results, "near_misses": near_misses, "success": bool(results)},
             {
                 "officers": (axes.get("officer_counts") or [None])[0],
@@ -4095,11 +4095,17 @@ def optimize_staffing_scenarios(
             "soft_rank_delta": _w2.get("soft_rank_delta"),
             "counterfactual_unlocks": _w2.get("counterfactual_unlocks") or [],
             "pareto_champions": _w2.get("pareto_champions") or {},
+            "non_dominated_shortlist": _w2.get("non_dominated_shortlist") or {},
+            "conflict_report": _w2.get("conflict_report") or {},
+            "ot_flsa_bridge": _w2.get("ot_flsa_bridge") or {},
         }
         if _w2.get("message") and soft_msg and "Pareto" in str(_w2.get("message")):
             soft_msg = _w2["message"]
         elif _w2.get("soft_rank_delta"):
             soft_msg = (soft_msg + " · " if soft_msg else "") + str(_w2["soft_rank_delta"])
+        nd = wave2_meta.get("non_dominated_shortlist") or {}
+        if nd.get("count"):
+            soft_msg = (soft_msg + " · " if soft_msg else "") + str(nd.get("message") or "")
     except Exception:
         wave2_meta = {}
 
@@ -4210,6 +4216,9 @@ def optimize_staffing_scenarios(
         "soft_rank_delta": (wave2_meta or {}).get("soft_rank_delta"),
         "counterfactual_unlocks": (wave2_meta or {}).get("counterfactual_unlocks") or [],
         "pareto_champions": (wave2_meta or {}).get("pareto_champions") or {},
+        "non_dominated_shortlist": (wave2_meta or {}).get("non_dominated_shortlist") or {},
+        "conflict_report": (wave2_meta or {}).get("conflict_report") or {},
+        "ot_flsa_bridge": (wave2_meta or {}).get("ot_flsa_bridge") or {},
         "near_misses": near_misses,
         "best": best_out,
         "ranked": ranked,

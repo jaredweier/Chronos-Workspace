@@ -63,6 +63,26 @@ def build_decision_table(
     rate = _avg_roster_hourly_rate()
     top = [enrich_option_economics(r, hourly_rate=rate, flsa_period_days=flsa_period_days) for r in top]
 
+    # P11 non-dominated chip row
+    try:
+        from logic.horizon_pack import non_dominated_shortlist
+
+        nd = non_dominated_shortlist(ranked or [])
+        if nd.get("chips"):
+            with host:
+                ui.label(nd.get("message") or "Non-dominated shortlist").style(
+                    "color:#86efac;font-weight:600;font-size:0.9rem;margin-bottom:6px"
+                )
+                with ui.row().classes("gap-2 flex-wrap q-mb-sm"):
+                    for ch in nd["chips"][:6]:
+                        labs = ", ".join(ch.get("labels") or []) or "trade-off"
+                        ui.badge(
+                            f"#{ch.get('rank')} N={ch.get('n')} · {labs}",
+                            color="primary",
+                        ).props("outline")
+    except Exception:
+        pass
+
     def econ(r: dict, key: str) -> Any:
         return (r.get("economics") or {}).get(key)
 

@@ -535,6 +535,14 @@ def render_simulator() -> None:
                     ui.menu_item("Weekend heat", on_click=lambda: show_weekend_heat())
                     ui.menu_item("Heat map (PNG)", on_click=lambda: do_heat())
                     ui.menu_item("Window failures", on_click=lambda: do_window_drill())
+                    ui.menu_item(
+                        "Scenario stories (what-if)",
+                        on_click=lambda: (state.get("_run_scenario_stories") or (lambda: None))(),
+                    )
+                    ui.menu_item(
+                        "Open-shift deputy rank",
+                        on_click=lambda: (state.get("_run_open_shift_deputy") or (lambda: None))(),
+                    )
                 with ui.dropdown_button("Export", icon="ios_share").classes("btn-ghost").props("no-caps outline dense"):
                     ui.menu_item("Options CSV", on_click=lambda: export_options())
                     ui.menu_item("Search audit JSON", on_click=lambda: export_audit())
@@ -1249,6 +1257,8 @@ def render_simulator() -> None:
         preview_open_shift_callouts = _sa["preview_open_shift_callouts"]
         post_open_shift_callouts = _sa["post_open_shift_callouts"]
         import_bid_prefs_to_soft = _sa["import_bid_prefs_to_soft"]
+        run_open_shift_deputy = _sa["run_open_shift_deputy"]
+        run_scenario_stories = _sa["run_scenario_stories"]
         export_options = _sa["export_options"]
         export_audit = _sa["export_audit"]
         run_diff_ab = _sa["run_diff_ab"]
@@ -1462,6 +1472,15 @@ def render_simulator() -> None:
             _pub["btn_post_open"].on_click(post_open_shift_callouts)
         if _pub.get("btn_import_bid_prefs") is not None:
             _pub["btn_import_bid_prefs"].on_click(import_bid_prefs_to_soft)
+        if _pub.get("btn_deputy") is not None:
+            _pub["btn_deputy"].on_click(run_open_shift_deputy)
+        if _pub.get("btn_stories") is not None:
+            _pub["btn_stories"].on_click(run_scenario_stories)
+        try:
+            state["_run_scenario_stories"] = run_scenario_stories
+            state["_run_open_shift_deputy"] = run_open_shift_deputy
+        except Exception:
+            pass
         if callable(_pub.get("refresh_readiness")):
             try:
                 _pub["refresh_readiness"]()

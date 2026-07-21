@@ -114,6 +114,12 @@ def render_publish_panel(state: dict, go_step_cb) -> tuple[ui.element, dict]:
                 elements["btn_import_bid_prefs"] = (
                     ui.button("Import bid prefs → soft rank").classes("btn-ghost").props("no-caps outline dense")
                 )
+                elements["btn_deputy"] = (
+                    ui.button("Open-shift deputy rank").classes("btn-ghost").props("no-caps outline dense")
+                )
+                elements["btn_stories"] = (
+                    ui.button("Scenario stories").classes("btn-ghost").props("no-caps outline dense")
+                )
 
         ui.html(
             '<div class="sim-section-title" style="margin-top:12px">Action log</div>',

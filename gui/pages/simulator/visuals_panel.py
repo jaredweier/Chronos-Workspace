@@ -80,7 +80,7 @@ def render_coverage_heatmap(host, result: dict, *, max_days: int = 21) -> None:
                     ui.label(lab).style("color:#9AABC4;font-size:0.75rem")
 
 
-def render_officer_gantt(host, result: dict, *, max_days: int = 21) -> None:
+def render_officer_gantt(host, result: dict, *, max_days: int = 21, state: dict | None = None) -> None:
     host.clear()
     g = officer_duty_gantt(result, max_days=max_days)
     with host:
@@ -88,17 +88,20 @@ def render_officer_gantt(host, result: dict, *, max_days: int = 21) -> None:
         ui.label(g.get("message") or "").style("color:#9AABC4;font-size:0.85rem;margin-bottom:4px")
         if g.get("hint"):
             ui.label(g["hint"]).style("color:#FDE68A;font-size:0.8rem;margin-bottom:8px")
+        ui.label("Click a cell to toggle ON/OFF (local soft delta — re-run Generate for hard truth).").style(
+            "color:#9AABC4;font-size:0.75rem;margin-bottom:6px"
+        )
         if not g.get("success"):
             return
         dates = g.get("dates") or []
-        # Day headers (compact)
+        delta_lab = ui.label("").style("color:#FDE68A;font-size:0.8rem;margin-bottom:4px")
         with ui.row().classes("gap-0 items-center flex-nowrap").style("overflow-x:auto;max-width:100%"):
             ui.label("Officer").style("width:7.5rem;color:#9AABC4;font-size:0.75rem;flex-shrink:0")
             ui.label("Start").style("width:3.2rem;color:#9AABC4;font-size:0.75rem;flex-shrink:0")
             for i, d in enumerate(dates[:max_days] or range(max_days)):
                 lab = str(d)[-5:] if isinstance(d, str) and len(str(d)) >= 5 else str(i + 1)
                 ui.label(lab).style("width:1.15rem;color:#7A8FA8;font-size:0.6rem;text-align:center;flex-shrink:0")
-        for row in g.get("rows") or []:
+        for si, row in enumerate(g.get("rows") or []):
             with ui.row().classes("gap-0 items-center flex-nowrap").style("overflow-x:auto;max-width:100%"):
                 ui.label(str(row.get("label") or "")[:14]).style(
                     "width:7.5rem;color:#E8EDF4;font-size:0.75rem;flex-shrink:0"
@@ -107,11 +110,43 @@ def render_officer_gantt(host, result: dict, *, max_days: int = 21) -> None:
                     "width:3.2rem;color:#D6E6FF;font-size:0.75rem;flex-shrink:0"
                 )
                 for cell in row.get("cells") or []:
-                    tip = f"{row.get('label')} {cell.get('date')}: {'ON' if cell.get('on') else 'OFF'} @ {row.get('start')}"
-                    ui.element("div").style(
-                        f"width:1.15rem;height:1.15rem;background:{cell.get('color')};"
-                        "border:1px solid rgba(255,255,255,0.05);flex-shrink:0;border-radius:2px"
-                    ).tooltip(tip)
+                    tip = (
+                        f"{row.get('label')} {cell.get('date')}: "
+                        f"{'ON' if cell.get('on') else 'OFF'} @ {row.get('start')} · click toggle"
+                    )
+                    di = int(cell.get("day") or 0)
+
+                    def _toggle(s_i=si, d_i=di):
+                        from logic.horizon_pack import gantt_duty_delta
+
+                        res = (state or {}).get("result") or result or {}
+                        out = gantt_duty_delta(res, slot_index=s_i, day_index=d_i)
+                        if out.get("success") and state is not None:
+                            prev = state.get("result") or res or {}
+                            state["result"] = {
+                                **prev,
+                                "officer_slots": out.get("officer_slots"),
+                                "coverage_by_day": out.get("coverage_by_day") or prev.get("coverage_by_day"),
+                            }
+                            try:
+                                delta_lab.set_text(out.get("message") or "")
+                            except Exception:
+                                pass
+                            ui.notify(out.get("message") or "Toggled", type="info")
+                            render_officer_gantt(host, state["result"], max_days=max_days, state=state)
+                        else:
+                            ui.notify(out.get("message") or "Toggle failed", type="warning")
+
+                    (
+                        ui.element("div")
+                        .style(
+                            f"width:1.15rem;height:1.15rem;background:{cell.get('color')};"
+                            "border:1px solid rgba(255,255,255,0.05);flex-shrink:0;"
+                            "border-radius:2px;cursor:pointer"
+                        )
+                        .tooltip(tip)
+                        .on("click", _toggle)
+                    )
         with ui.row().classes("gap-3 q-mt-sm flex-wrap"):
             for lab, col in (("ON (day)", "#22c55e"), ("ON (night)", "#3B7DD8"), ("OFF", "#1e293b")):
                 with ui.row().classes("gap-1 items-center"):
@@ -189,7 +224,7 @@ def bind_visuals_panel(
         if heat_host is not None:
             render_coverage_heatmap(heat_host, res)
         if gantt_host is not None:
-            render_officer_gantt(gantt_host, res)
+            render_officer_gantt(gantt_host, res, state=state)
         if set_why and res:
             short = (res.get("metrics") or {}).get("night_risk_gaps")
             if short:

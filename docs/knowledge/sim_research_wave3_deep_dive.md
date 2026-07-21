@@ -84,16 +84,16 @@ From Policing Institute / Police Chief / NIJ-class sources:
 
 | ID | Theme | Rationale |
 |----|--------|-----------|
-| **P11** | True multi-objective shortlist (non-dominated set UI chip row) | Beyond single soft_score #1 |
-| **P12** | Structured cheap-reject conflict IDs → MUS-style report | Stronger autopsy |
-| **P13** | Open-shift deputy: score candidates from thin-band callouts + rest/OT equity | TeleStaff/FirstDue gap fill |
-| **P14** | Live OT ledger ↔ sim FLSA meters side-by-side | Burnout visibility |
-| **P15** | Bid + preference vector into CP-SAT seed soft (still seed-only) | Close loop prefs→search |
-| **P16** | Scenario stories (“hire 1 clears Fri night”) narrative cards from what-if | Supervisor language |
-| **P17** | Browser UAT pack for P0–P10 panels | Trust / no theater |
-| **P18** | Optional drag-edit of duty Gantt → re-sim delta | McKinsey interactive ideal |
+| **P11** | True multi-objective shortlist — **landed** (`horizon_pack.non_dominated_shortlist`) |
+| **P12** | Structured conflict IDs — **landed** (`structured_conflict_report`) |
+| **P13** | Open-shift deputy — **landed** (`open_shift_deputy_from_sim`) |
+| **P14** | Live OT ↔ FLSA meters — **landed** (`ot_ledger_vs_flsa`) |
+| **P15** | Bid → seed soft vector — **landed** (`bid_prefs_for_cpsat_seed`) |
+| **P16** | Scenario story cards — **landed** (`scenario_story_cards`) |
+| **P17** | Browser UAT pack — **landed** (`scripts/sim_wave_uat.py`) |
+| **P18** | Gantt click toggle soft delta — **landed** (`gantt_duty_delta`) |
 
-**Suggested next product build order:** **P17 (prove UI) → P11 → P12 → P13 → P16**.
+Hub: `logic/horizon_pack.py` · UAT: `python scripts/sim_wave_uat.py` · live: `--live`
 
 ---
 
