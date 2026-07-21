@@ -5,4 +5,4 @@ reportlab
 
 # Duty Console — modern web + native UI (primary)
 nicegui>=2.0
-pywebview>=5.0
+pywebview>=6.2.1
