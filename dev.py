@@ -500,6 +500,26 @@ def cmd_chronos_e2e(args):
     )
 
 
+def cmd_sim_wave_uat(args):
+    """P17 static (+ optional live) simulator wave proof."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    script = root / "scripts" / "sim_wave_uat.py"
+    cmd = [sys.executable, str(script)]
+    if getattr(args, "live", False):
+        cmd.append("--live")
+    base = (getattr(args, "base", None) or "").strip()
+    if base:
+        cmd.extend(["--base", base])
+    elif os.environ.get("CHRONOS_PROOF_URL"):
+        cmd.extend(["--base", os.environ["CHRONOS_PROOF_URL"]])
+    return subprocess.call(cmd, cwd=str(root))
+
+
 def cmd_leave_flow_smoke(_args):
     """Logic path for Chronos leave approve/reject (no browser)."""
     from scripts.leave_flow_smoke import run_leave_flow_smoke
@@ -1065,6 +1085,16 @@ def main():
     local_d.add_argument("task", nargs="*", help="Task text")
     local_d.add_argument("--list", action="store_true", help="Show local lane catalog")
     local_d.add_argument("--exec", action="store_true", help="Execute first free-machine command")
+    sim_uat = sub.add_parser(
+        "sim-wave-uat",
+        help="P17 simulator wave UAT pack (static markers + optional --live Playwright)",
+    )
+    sim_uat.add_argument("--live", action="store_true", help="Hit Chronos via Playwright")
+    sim_uat.add_argument(
+        "--base",
+        default="",
+        help="Chronos URL (default CHRONOS_PROOF_URL or http://127.0.0.1:8090)",
+    )
     chronos_e2e = sub.add_parser(
         "chronos-e2e",
         help="Optional Playwright smoke for NiceGUI Chronos (one server only; install playwright separately)",
@@ -1297,6 +1327,7 @@ def main():
         "scenarios": cmd_scenarios,
         "math-scenarios": cmd_math_scenarios,
         "local-dispatch": cmd_local_dispatch,
+        "sim-wave-uat": cmd_sim_wave_uat,
         "chronos-e2e": cmd_chronos_e2e,
         "virtual-lab": cmd_virtual_lab,
         "leave-flow-smoke": cmd_leave_flow_smoke,

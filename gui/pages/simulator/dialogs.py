@@ -107,6 +107,25 @@ def open_no_match_dialog(
         except Exception:
             pass
 
+        # P12 structured conflict IDs
+        try:
+            from logic.horizon_pack import structured_conflict_report
+
+            cr = (opt_result or {}).get("conflict_report") or structured_conflict_report(
+                opt_result or {}, form=config or {}
+            )
+            if cr.get("conflicts"):
+                ui.label("Structured conflicts").style("color:#FCA5A5;font-weight:700;margin-top:10px")
+                for c in cr["conflicts"][:5]:
+                    ui.label(f"[{c.get('id')}] {c.get('label')}").style(
+                        "color:#E8EDF4;font-size:0.88rem;margin-top:3px"
+                    )
+                    ui.label(f"→ {c.get('fix')}").style(
+                        "color:#9AABC4;font-size:0.8rem;margin-left:12px;margin-bottom:2px"
+                    )
+        except Exception:
+            pass
+
         # P7 counterfactual unlocks
         try:
             from logic.sim_wave2 import counterfactual_unlocks

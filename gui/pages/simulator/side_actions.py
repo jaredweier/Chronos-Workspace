@@ -499,6 +499,24 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         set_action_log("\n".join(lines), ok=True)
         ui.notify("Scenario stories in summary", type="info")
 
+    def run_ot_flsa_bridge():
+        from logic.horizon_pack import ot_ledger_vs_flsa
+
+        res = state.get("opt_result") or state.get("result") or {}
+        row = state.get("selected_row") or res.get("best") or res
+        bridge = res.get("ot_flsa_bridge") or ot_ledger_vs_flsa(row if isinstance(row, dict) else {})
+        lines = [bridge.get("note") or "OT ↔ FLSA bridge", ""]
+        lines.append("Sim FLSA soft meters (legal thresholds):")
+        for m in bridge.get("sim_flsa_meters") or []:
+            lines.append(f"  · {m.get('detail')}")
+        live = bridge.get("live_ot") or {}
+        lines.append("")
+        lines.append(f"Live OT: {live.get('message') or '—'}")
+        for t in live.get("top") or []:
+            lines.append(f"  · {t.get('name')}: {t.get('ot_hours')}")
+        set_why("\n".join(lines))
+        ui.notify("OT ↔ FLSA in Why panel", type="info")
+
     def export_options():
         ranked = state.get("ranked") or []
         if not ranked:
@@ -783,6 +801,7 @@ def bind_side_actions(state: dict, c: Dict[str, Any]) -> Dict[str, Callable]:
         "import_bid_prefs_to_soft": import_bid_prefs_to_soft,
         "run_open_shift_deputy": run_open_shift_deputy,
         "run_scenario_stories": run_scenario_stories,
+        "run_ot_flsa_bridge": run_ot_flsa_bridge,
         "export_options": export_options,
         "export_audit": export_audit,
         "run_diff_ab": run_diff_ab,

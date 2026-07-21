@@ -543,6 +543,7 @@ def render_simulator() -> None:
                         "Open-shift deputy rank",
                         on_click=lambda: (state.get("_run_open_shift_deputy") or (lambda: None))(),
                     )
+                    ui.menu_item("OT ledger ↔ FLSA meters", on_click=lambda: run_ot_flsa_bridge())
                 with ui.dropdown_button("Export", icon="ios_share").classes("btn-ghost").props("no-caps outline dense"):
                     ui.menu_item("Options CSV", on_click=lambda: export_options())
                     ui.menu_item("Search audit JSON", on_click=lambda: export_audit())
@@ -1259,6 +1260,7 @@ def render_simulator() -> None:
         import_bid_prefs_to_soft = _sa["import_bid_prefs_to_soft"]
         run_open_shift_deputy = _sa["run_open_shift_deputy"]
         run_scenario_stories = _sa["run_scenario_stories"]
+        run_ot_flsa_bridge = _sa["run_ot_flsa_bridge"]
         export_options = _sa["export_options"]
         export_audit = _sa["export_audit"]
         run_diff_ab = _sa["run_diff_ab"]
